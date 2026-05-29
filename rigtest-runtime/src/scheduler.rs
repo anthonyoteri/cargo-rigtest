@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use futures::FutureExt;
 use rand::seq::SliceRandom;
-use rand::RngCore;
+use rand::RngExt;
 use rand::SeedableRng;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -173,9 +173,9 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         Box::new(())
     };
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
-    let state_var = format!("RIG_STATE_{:016x}", rng.next_u64());
+    let state_var = format!("RIG_STATE_{:016x}", rng.random::<u64>());
     let state_json: String = if let Some(entry) = global_setup {
         (entry.serialize_fn)(&*global_data)
     } else {
@@ -185,7 +185,7 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
     let cases_refs: Vec<&'static crate::registry::TestCase> = RIG_TEST_CASES.iter().collect();
     let mut cases = apply_filter(&cases_refs, args.filter.as_deref());
 
-    let seed = args.seed.unwrap_or_else(|| rng.next_u64());
+    let seed = args.seed.unwrap_or_else(|| rng.random::<u64>());
     println!("cargo-rigtest: running with seed {seed}");
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
