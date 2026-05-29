@@ -1,7 +1,4 @@
 #![warn(clippy::pedantic)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::unused_async)]
 
 #[doc(hidden)]
 pub extern crate linkme as __linkme;
@@ -79,6 +76,10 @@ pub(crate) fn flush_and_exit(code: i32) -> ! {
 
 /// Entry point for test binaries using cargo-rigtest.
 /// Call this from `main()` in a `[[test]]` target with `harness = false`.
+///
+/// # Panics
+///
+/// Panics if the Tokio multi-thread runtime cannot be initialized.
 pub fn run_main() -> ! {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -1,5 +1,3 @@
-#![allow(clippy::unused_async)]
-
 use rigtest::{global_setup, global_teardown, testcase, TestContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

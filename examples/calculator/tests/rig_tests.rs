@@ -1,5 +1,3 @@
-#![allow(clippy::unused_async)]
-
 use std::sync::Arc;
 
 use rigtest::prelude::*;

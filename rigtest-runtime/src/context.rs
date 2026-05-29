@@ -41,6 +41,10 @@ impl TestContext {
     ///     MyDb::connect(&cfg.db_url).await   // ? works naturally
     /// }).await?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the closure returns an error or if it panics.
     pub async fn setup<F, Fut, T>(&self, f: F) -> Result<T, crate::Error>
     where
         F: FnOnce(Arc<Box<dyn Any + Send + Sync>>) -> Fut,
@@ -69,6 +73,10 @@ impl TestContext {
     ///     conn.release_back_to(&cfg.pool).await   // ? works naturally
     /// }).await?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the closure returns an error or if it panics.
     ///
     /// # Teardown and timeout
     ///

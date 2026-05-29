@@ -49,6 +49,11 @@ impl Reporter {
 
     /// Add a spinner for a newly started test. Returns a handle used by
     /// `test_passed` / `test_failed` to finalise the line.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal spinner template string is malformed (it is a
+    /// compile-time constant, so this cannot happen in practice).
     #[must_use]
     pub fn test_started(&self, name: &str) -> ProgressBar {
         if self.is_tty {

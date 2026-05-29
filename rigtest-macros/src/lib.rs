@@ -1,6 +1,4 @@
 #![warn(clippy::pedantic)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -72,6 +70,7 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     let expanded = quote! {
+        #[allow(clippy::unused_async)]
         #func
 
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
@@ -110,6 +109,7 @@ pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
+        #[allow(clippy::unused_async)]
         #func
 
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_GLOBAL_SETUP)]
@@ -150,6 +150,11 @@ pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The `SomeType` must match the return type of the corresponding
 /// `#[global_setup]` function. At most one `#[global_teardown]` function
 /// may be defined in the test binary.
+///
+/// # Panics
+///
+/// Panics at compile time if the annotated function does not have exactly one
+/// typed parameter.
 #[proc_macro_attribute]
 pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
@@ -174,6 +179,7 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .expect("#[global_teardown] function must have exactly one typed parameter");
 
     let expanded = quote! {
+        #[allow(clippy::unused_async)]
         #func
 
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_GLOBAL_TEARDOWN)]

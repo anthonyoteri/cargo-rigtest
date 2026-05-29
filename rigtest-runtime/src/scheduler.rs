@@ -69,8 +69,83 @@ fn apply_filter<'a>(
         .collect()
 }
 
+struct RunConfig {
+    exe: std::path::PathBuf,
+    state_var: String,
+    state_json: String,
+    no_capture: bool,
+}
+
+async fn dispatch_cases(
+    reporter: &Arc<Reporter>,
+    cfg: &RunConfig,
+    semaphore: Arc<Semaphore>,
+    parallel_cases: Vec<&'static crate::registry::TestCase>,
+    serial_cases: Vec<&'static crate::registry::TestCase>,
+) -> (usize, usize) {
+    let mut passed = 0usize;
+    let mut skipped = 0usize;
+    let mut join_set: JoinSet<Outcome> = JoinSet::new();
+
+    for tc in parallel_cases {
+        let reporter = Arc::clone(reporter);
+        let semaphore = Arc::clone(&semaphore);
+        let exe = cfg.exe.clone();
+        let state_var = cfg.state_var.clone();
+        let state_json = cfg.state_json.clone();
+        let no_capture = cfg.no_capture;
+
+        join_set.spawn(async move {
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("semaphore should not be closed");
+            let (outcome, _) =
+                run_test(&reporter, &exe, tc, &state_var, &state_json, no_capture).await;
+            outcome
+        });
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Outcome::Passed) => passed += 1,
+            Ok(Outcome::Skipped) => skipped += 1,
+            Ok(Outcome::Failed) => {}
+            Err(e) => eprintln!("cargo-rigtest: task join error: {e}"),
+        }
+    }
+
+    for tc in serial_cases {
+        let (outcome, _) = run_test(
+            reporter,
+            &cfg.exe,
+            tc,
+            &cfg.state_var,
+            &cfg.state_json,
+            cfg.no_capture,
+        )
+        .await;
+        match outcome {
+            Outcome::Passed => passed += 1,
+            Outcome::Skipped => skipped += 1,
+            Outcome::Failed => {}
+        }
+    }
+
+    (passed, skipped)
+}
+
 /// Run the full test suite described by `args`.
-#[allow(clippy::too_many_lines)]
+///
+/// # Errors
+///
+/// Returns an error if any test fails or if the current executable path
+/// cannot be determined.
+///
+/// # Panics
+///
+/// Panics if more than one `#[global_setup]` or `#[global_teardown]` function
+/// is registered in the binary.
 pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
     if let Some(ref test_name) = args.run_single {
         return run_single_test(test_name, args.state_env_var.as_deref()).await;
@@ -127,60 +202,20 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
     let exe =
         std::env::current_exe().map_err(|e| anyhow!("failed to find current executable: {e}"))?;
 
+    let cfg = RunConfig {
+        exe,
+        state_var,
+        state_json,
+        no_capture: args.no_capture,
+    };
+
     let suite_start = Instant::now();
 
     let (serial_cases, parallel_cases): (Vec<_>, Vec<_>) =
         cases.into_iter().partition(|tc| tc.serial);
 
-    let mut passed = 0usize;
-    let mut skipped = 0usize;
-
-    let mut join_set: JoinSet<Outcome> = JoinSet::new();
-
-    for tc in parallel_cases {
-        let reporter = Arc::clone(&reporter);
-        let semaphore = Arc::clone(&semaphore);
-        let exe = exe.clone();
-        let state_var = state_var.clone();
-        let state_json = state_json.clone();
-        let no_capture = args.no_capture;
-
-        join_set.spawn(async move {
-            let _permit = semaphore
-                .acquire()
-                .await
-                .expect("semaphore should not be closed");
-            let (outcome, _) =
-                run_test(&reporter, &exe, tc, &state_var, &state_json, no_capture).await;
-            outcome
-        });
-    }
-
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(Outcome::Passed) => passed += 1,
-            Ok(Outcome::Skipped) => skipped += 1,
-            Ok(Outcome::Failed) => {}
-            Err(e) => eprintln!("cargo-rigtest: task join error: {e}"),
-        }
-    }
-
-    for tc in serial_cases {
-        let (outcome, _) = run_test(
-            &reporter,
-            &exe,
-            tc,
-            &state_var,
-            &state_json,
-            args.no_capture,
-        )
-        .await;
-        match outcome {
-            Outcome::Passed => passed += 1,
-            Outcome::Skipped => skipped += 1,
-            Outcome::Failed => {}
-        }
-    }
+    let (passed, skipped) =
+        dispatch_cases(&reporter, &cfg, semaphore, parallel_cases, serial_cases).await;
 
     let elapsed = suite_start.elapsed();
     reporter.finish(passed, skipped, total, elapsed);
