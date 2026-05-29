@@ -1,0 +1,109 @@
+name: Build binaries
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and upload binaries for (e.g. v0.1.0)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-binaries:
+    name: Build binary (${{ matrix.upload_name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: cargo-rigtest
+            upload_name: cargo-rigtest-linux-x86_64.tar.gz
+            target: x86_64-unknown-linux-musl
+            artifact_dir: target/x86_64-unknown-linux-musl/release
+            use_cross: false
+
+          - os: ubuntu-latest
+            artifact: cargo-rigtest
+            upload_name: cargo-rigtest-linux-aarch64.tar.gz
+            target: aarch64-unknown-linux-musl
+            artifact_dir: target/aarch64-unknown-linux-musl/release
+            use_cross: true
+
+          - os: macos-latest
+            artifact: cargo-rigtest
+            upload_name: cargo-rigtest-macos-aarch64.tar.gz
+            target: ""
+            artifact_dir: target/release
+            use_cross: false
+
+          - os: macos-latest
+            artifact: cargo-rigtest
+            upload_name: cargo-rigtest-macos-x86_64.tar.gz
+            target: x86_64-apple-darwin
+            artifact_dir: target/x86_64-apple-darwin/release
+            use_cross: false
+
+          - os: windows-latest
+            artifact: cargo-rigtest.exe
+            upload_name: cargo-rigtest-windows-x86_64.exe
+            target: ""
+            artifact_dir: target/release
+            use_cross: false
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install cross (Linux aarch64)
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: >
+          ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release -p cargo-rigtest
+          ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
+
+      - name: Strip binary (Unix, non-cross)
+        if: runner.os != 'Windows' && !matrix.use_cross
+        run: strip ${{ matrix.artifact_dir }}/${{ matrix.artifact }}
+
+      - name: Ad-hoc sign binary (macOS only)
+        if: runner.os == 'macOS'
+        run: >
+          codesign --sign - --force
+          --preserve-metadata=entitlements,requirements,flags,runtime
+          ${{ matrix.artifact_dir }}/${{ matrix.artifact }}
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -czf "${{ matrix.upload_name }}" -C "${{ matrix.artifact_dir }}" "${{ matrix.artifact }}"
+
+      - name: Copy binary (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cp "${{ matrix.artifact_dir }}/${{ matrix.artifact }}" "${{ matrix.upload_name }}"
+
+      - name: Upload to GitHub release
+        run: gh release upload "${{ inputs.tag || github.ref_name }}" "${{ matrix.upload_name }}" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
