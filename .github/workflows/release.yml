@@ -40,22 +40,23 @@ jobs:
           git-user-email: "github-actions[bot]@users.noreply.github.com"
 
       - name: Generate release notes
-        if: steps.release.outputs.bumped == 'true'
+        if: steps.release.outputs.version != ''
         run: |
           cog changelog --at "${{ steps.release.outputs.version }}" \
             > /tmp/release_notes.md \
             || echo "No structured changelog available." > /tmp/release_notes.md
 
       - name: Publish rigtest-macros to crates.io
-        if: steps.release.outputs.bumped == 'true'
+        if: steps.release.outputs.version != ''
         run: cargo publish -p rigtest-macros
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for rigtest-macros to be indexed
-        if: steps.release.outputs.bumped == 'true'
+        if: steps.release.outputs.version != ''
         run: |
           VERSION="${{ steps.release.outputs.version }}"
+          VERSION="${VERSION#v}"
           URL="https://crates.io/api/v1/crates/rigtest-macros/${VERSION}"
           echo "Polling ${URL} ..."
           for i in $(seq 1 24); do
@@ -72,15 +73,16 @@ jobs:
           exit 1
 
       - name: Publish rigtest to crates.io
-        if: steps.release.outputs.bumped == 'true'
+        if: steps.release.outputs.version != ''
         run: cargo publish -p rigtest
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for rigtest to be indexed
-        if: steps.release.outputs.bumped == 'true'
+        if: steps.release.outputs.version != ''
         run: |
           VERSION="${{ steps.release.outputs.version }}"
+          VERSION="${VERSION#v}"
           URL="https://crates.io/api/v1/crates/rigtest/${VERSION}"
           echo "Polling ${URL} ..."
           for i in $(seq 1 24); do
@@ -97,13 +99,13 @@ jobs:
           exit 1
 
       - name: Publish cargo-rigtest to crates.io
-        if: steps.release.outputs.bumped == 'true'
+        if: steps.release.outputs.version != ''
         run: cargo publish -p cargo-rigtest
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Create GitHub release
-        if: steps.release.outputs.bumped == 'true'
+        if: steps.release.outputs.version != ''
         run: |
           gh release create "${{ steps.release.outputs.version }}" \
             --title "${{ steps.release.outputs.version }}" \
