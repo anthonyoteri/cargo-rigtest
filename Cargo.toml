@@ -8,6 +8,7 @@ edition = "2021"
 authors = ["Anthony Oteri <anthony.oteri@agiletv.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anthonyoteri/cargo-rig"
+rust-version = "1.87"
 
 [workspace.dependencies]
 libc = "0.2"

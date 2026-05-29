@@ -29,10 +29,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -W clippy::pedantic -D warnings
 
   test:
-    name: Test
+    name: Test (${{ matrix.rust }})
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust:
+          - "1.87"   # MSRV
+          - stable
+          - nightly
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rust }}
       - run: cargo test --workspace

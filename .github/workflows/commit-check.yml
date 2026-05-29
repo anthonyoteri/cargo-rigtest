@@ -1,8 +1,9 @@
 name: Conventional Commits
 
 on:
-  pull_request:
+  push:
     branches: [main]
+  pull_request:
 
 jobs:
   check:
@@ -15,4 +16,6 @@ jobs:
       - uses: cocogitto/cocogitto-action@v3
         with:
           check: true
-          check-latest-tag-only: true
+          # On PRs check only the commits introduced by the PR.
+          # On pushes to main check only commits since the previous HEAD.
+          from: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}

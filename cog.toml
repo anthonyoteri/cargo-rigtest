@@ -1,21 +1,24 @@
-# Cocogitto configuration — https://docs.cocogitto.io/
+# Cocogitto configuration
+# https://docs.cocogitto.io/config/
 
-[changelog]
-path = "CHANGELOG.md"
-template = "keepachangelog"
-remote = "github.com"
-repository = "cargo-rig"
-owner = "anthonyoteri"
-authors = [
-  { username = "anthonyoteri", signature = "Anthony Oteri" },
-]
+ignore_merge_commits = true
+tag_prefix = "v"
 
-[bump]
 # Update the workspace version in Cargo.toml before committing the release.
 pre_bump_hooks = [
   "cargo set-version {{version}}",
   "cargo check --workspace",
   "git add Cargo.toml Cargo.lock",
+]
+
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "github.com"
+repository = "cargo-rig"
+owner = "anthonyoteri"
+authors = [
+  { username = "anthonyoteri", signature = "Anthony Oteri" },
 ]
 
 [commit_types]
@@ -25,12 +28,5 @@ perf     = { changelog_title = "Performance" }
 refactor = { changelog_title = "Refactoring" }
 docs     = { changelog_title = "Documentation" }
 test     = { changelog_title = "Tests" }
-ci       = { changelog_title = "CI/CD" }
+ci       = { changelog_title = "CI", omit_from_changelog = true }
 chore    = { changelog_title = "Miscellaneous", omit_from_changelog = true }
-
-[git_hooks]
-# Enforce conventional commits locally.
-# Install with: cog install-hooks
-commit-msg = """
-cog verify --file $1
-"""
