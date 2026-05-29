@@ -249,6 +249,7 @@ async fn graceful_kill(child: &mut tokio::process::Child) {
 }
 
 /// Run a single test subprocess, respecting timeout and capture settings.
+#[allow(clippy::too_many_lines)]
 async fn spawn_test_process(
     exe: &std::path::Path,
     test_name: &str,
@@ -291,7 +292,6 @@ async fn spawn_test_process(
             None => child.wait().await.map_err(|e| anyhow!("{e}"))?,
         };
 
-        use tokio::io::AsyncReadExt;
         let mut stderr_bytes = Vec::new();
         if let Some(mut h) = child.stderr.take() {
             let _ = h.read_to_end(&mut stderr_bytes).await;
