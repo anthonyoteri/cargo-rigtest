@@ -1,0 +1,37 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "labels": ["dependencies"],
+  "schedule": ["before 6am on Monday"],
+  "dependencyDashboard": true,
+  "packageRules": [
+    {
+      "description": "Rust patch updates — auto-merge when CI passes",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch"],
+      "groupName": "Rust patch updates",
+      "automerge": true,
+      "platformAutomerge": true
+    },
+    {
+      "description": "Rust minor updates — one PR for a single review",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor"],
+      "groupName": "Rust minor updates"
+    },
+    {
+      "description": "Rust major updates — individual PRs for careful review",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"]
+    },
+    {
+      "description": "GitHub Actions — group all updates and auto-merge",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "automerge": true,
+      "platformAutomerge": true
+    }
+  ]
+}
