@@ -1,7 +1,7 @@
 // Test functions must be `async` for the framework's BoxFuture signature.
 #![allow(clippy::unused_async)]
 
-use rig::{global_setup, global_teardown, testcase, TestContext};
+use rigtest::{global_setup, global_teardown, testcase, TestContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -72,5 +72,5 @@ async fn builds_http_request(
 }
 
 fn main() {
-    rig::run_main();
+    rigtest::run_main();
 }

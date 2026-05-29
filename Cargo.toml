@@ -1,5 +1,5 @@
 [workspace]
-members = ["cargo-rig", "rig-macros", "rig-runtime", "examples/basic", "examples/calculator"]
+members = ["cargo-rigtest", "rigtest-macros", "rigtest-runtime", "examples/basic", "examples/calculator"]
 resolver = "2"
 
 [workspace.package]
@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Anthony Oteri <anthony.oteri@agiletv.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/anthonyoteri/cargo-rig"
+repository = "https://github.com/anthonyoteri/cargo-rigtest"
 rust-version = "1.87"
 
 [workspace.dependencies]

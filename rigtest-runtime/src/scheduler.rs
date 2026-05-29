@@ -21,7 +21,7 @@ fn default_jobs() -> usize {
 
 /// Arguments forwarded from `cargo rig run` into the test binary.
 #[derive(Parser, Debug)]
-#[command(about = "Run the cargo-rig acceptance test suite")]
+#[command(about = "Run the cargo-rigtest acceptance test suite")]
 pub struct RuntimeArgs {
     /// Maximum number of parallel test jobs [default: number of CPUs].
     #[arg(short, long)]
@@ -51,7 +51,7 @@ pub struct RuntimeArgs {
     #[arg(long, hide = true)]
     pub state_env_var: Option<String>,
 
-    /// Exit immediately with code 0. Used by cargo-rig to confirm this binary
+    /// Exit immediately with code 0. Used by cargo-rigtest to confirm this binary
     /// is a rig test runner before attempting to run it.
     #[arg(long, hide = true)]
     pub rig_probe: bool,
@@ -79,12 +79,12 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
 
     assert!(
         RIG_GLOBAL_SETUP.len() <= 1,
-        "cargo-rig: at most one #[global_setup] function may be defined, found {}",
+        "cargo-rigtest: at most one #[global_setup] function may be defined, found {}",
         RIG_GLOBAL_SETUP.len()
     );
     assert!(
         RIG_GLOBAL_TEARDOWN.len() <= 1,
-        "cargo-rig: at most one #[global_teardown] function may be defined, found {}",
+        "cargo-rigtest: at most one #[global_teardown] function may be defined, found {}",
         RIG_GLOBAL_TEARDOWN.len()
     );
 
@@ -122,7 +122,7 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         use rand::RngCore;
         rand::thread_rng().next_u64()
     });
-    println!("cargo-rig: running with seed {seed}");
+    println!("cargo-rigtest: running with seed {seed}");
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
     cases.shuffle(&mut rng);
@@ -131,7 +131,7 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
     let jobs = match (args.no_capture, args.jobs) {
         (true, None) => 1,
         (true, Some(n)) => {
-            eprintln!("cargo-rig: warning: --no-capture with --jobs={n} may interleave output");
+            eprintln!("cargo-rigtest: warning: --no-capture with --jobs={n} may interleave output");
             n
         }
         (false, n) => n.unwrap_or_else(default_jobs),
@@ -178,7 +178,7 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
             Ok(Outcome::Passed) => passed += 1,
             Ok(Outcome::Skipped) => skipped += 1,
             Ok(Outcome::Failed) => {}
-            Err(e) => eprintln!("cargo-rig: task join error: {e}"),
+            Err(e) => eprintln!("cargo-rigtest: task join error: {e}"),
         }
     }
 
@@ -355,7 +355,7 @@ async fn spawn_test_process(
         Some(2) => {
             let reason = stderr
                 .lines()
-                .find_map(|l| l.strip_prefix("cargo-rig-skip: "))
+                .find_map(|l| l.strip_prefix("cargo-rigtest-skip: "))
                 .unwrap_or("")
                 .to_string();
             Ok(ProcessOutcome::Skipped { reason })
@@ -447,7 +447,7 @@ async fn run_single_test(test_name: &str, state_var: Option<&str>) -> anyhow::Re
     let tc = RIG_TEST_CASES
         .iter()
         .find(|tc| tc.name == test_name)
-        .ok_or_else(|| anyhow!("cargo-rig: no test named '{test_name}'"))?;
+        .ok_or_else(|| anyhow!("cargo-rigtest: no test named '{test_name}'"))?;
 
     let ctx = TestContext::new(global_data);
 
@@ -459,7 +459,7 @@ async fn run_single_test(test_name: &str, state_var: Option<&str>) -> anyhow::Re
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {
             if e.downcast_ref::<crate::Skip>().is_some() {
-                eprintln!("cargo-rig-skip: {e}");
+                eprintln!("cargo-rigtest-skip: {e}");
                 crate::flush_and_exit(2);
             }
             Err(anyhow!("{e}"))

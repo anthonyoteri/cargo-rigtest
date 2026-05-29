@@ -15,20 +15,20 @@ pub mod reporter;
 pub mod scheduler;
 
 pub use context::TestContext;
-pub use rig_macros::{global_setup, global_teardown, testcase};
+pub use rigtest_macros::{global_setup, global_teardown, testcase};
 pub use scheduler::RuntimeArgs;
 
 /// Convenient glob import for test files.
 ///
 /// ```ignore
-/// use rig::prelude::*;
+/// use rigtest::prelude::*;
 /// ```
 ///
 /// Brings into scope: [`TestContext`] and the attribute macros [`testcase`],
 /// [`global_setup`], and [`global_teardown`].
 pub mod prelude {
     pub use crate::TestContext;
-    pub use rig_macros::{global_setup, global_teardown, testcase};
+    pub use rigtest_macros::{global_setup, global_teardown, testcase};
 }
 
 /// Convenience alias for the error type used by test functions, setup, and
@@ -52,9 +52,9 @@ impl std::error::Error for Skip {}
 ///
 /// ```ignore
 /// #[testcase]
-/// async fn my_test(_ctx: Arc<TestContext>) -> Result<(), rig::Error> {
+/// async fn my_test(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
 ///     if std::env::var("DB_URL").is_err() {
-///         rig::skip!("DB_URL not set");
+///         rigtest::skip!("DB_URL not set");
 ///     }
 ///     Ok(())
 /// }
@@ -78,7 +78,7 @@ pub(crate) fn flush_and_exit(code: i32) -> ! {
     std::process::exit(code);
 }
 
-/// Entry point for test binaries using cargo-rig.
+/// Entry point for test binaries using cargo-rigtest.
 /// Call this from `main()` in a `[[test]]` target with `harness = false`.
 pub fn run_main() -> ! {
     let runtime = tokio::runtime::Builder::new_multi_thread()

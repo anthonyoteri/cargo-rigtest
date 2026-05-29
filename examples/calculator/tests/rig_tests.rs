@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use rig::prelude::*;
+use rigtest::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // ── Global setup / teardown (both are optional) ───────────────────────────────
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 // If your tests don't need shared infrastructure, remove these two functions
 // entirely — the framework runs fine without them.
 //
-// The state type must implement Serialize + Deserialize so cargo-rig can pass
+// The state type must implement Serialize + Deserialize so cargo-rigtest can pass
 // it to each test subprocess via a temporary environment variable.
 
 #[derive(Serialize, Deserialize)]
@@ -56,7 +56,7 @@ async fn large_number_arithmetic_skipped_on_32bit(
     _ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if std::mem::size_of::<usize>() < 8 {
-        rig::skip!("requires 64-bit platform");
+        rigtest::skip!("requires 64-bit platform");
     }
     assert_eq!(calculator::add(i64::MAX, 0), i64::MAX);
     Ok(())
@@ -194,5 +194,5 @@ async fn stateful_calculator_handles_division(
 }
 
 fn main() {
-    rig::run_main();
+    rigtest::run_main();
 }

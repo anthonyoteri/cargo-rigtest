@@ -40,8 +40,8 @@ jobs:
       - name: Publish to crates.io
         if: steps.release.outputs.bumped == 'true'
         run: |
-          cargo publish -p rig-macros
-          cargo publish -p rig
-          cargo publish -p cargo-rig
+          cargo publish -p rigtest-macros
+          cargo publish -p rigtest
+          cargo publish -p cargo-rigtest
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

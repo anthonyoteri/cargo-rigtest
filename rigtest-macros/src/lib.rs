@@ -11,7 +11,7 @@ use syn::FnArg;
 use syn::ItemFn;
 use syn::Pat;
 
-/// Registers an async test function with the cargo-rig runtime.
+/// Registers an async test function with the cargo-rigtest runtime.
 ///
 /// Accepts optional flags:
 /// - `serial` — prevent concurrent execution with any other test
@@ -21,7 +21,7 @@ use syn::Pat;
 /// Flags can be combined:
 /// ```ignore
 /// #[testcase(serial, timeout = Duration::from_secs(30), retries = 2)]
-/// async fn my_test(ctx: Arc<TestContext>) -> Result<(), rig::Error> { ... }
+/// async fn my_test(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> { ... }
 /// ```
 ///
 /// # Timeout and teardown
@@ -64,10 +64,10 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Build a unique static name: __RIG_TESTCASE_SOME_FUNCTION_NAME
+    // Build a unique static name: __RIGTEST_TESTCASE_SOME_FUNCTION_NAME
     let static_ident = syn::Ident::new(
         &format!(
-            "__RIG_TESTCASE_{}",
+            "__RIGTEST_TESTCASE_{}",
             func_name_str.to_uppercase().replace('-', "_")
         ),
         Span::call_site(),
@@ -76,10 +76,10 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #func
 
-        #[::rig::__linkme::distributed_slice(::rig::registry::RIG_TEST_CASES)]
-        #[linkme(crate = ::rig::__linkme)]
-        static #static_ident: ::rig::registry::TestCase =
-            ::rig::registry::TestCase {
+        #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
+        #[linkme(crate = ::rigtest::__linkme)]
+        static #static_ident: ::rigtest::registry::TestCase =
+            ::rigtest::registry::TestCase {
                 name: #func_name_str,
                 module: module_path!(),
                 file: file!(),
@@ -93,7 +93,7 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Registers an async global setup function with the cargo-rig runtime.
+/// Registers an async global setup function with the cargo-rigtest runtime.
 ///
 /// The annotated function must have the signature:
 /// ```ignore
@@ -114,10 +114,10 @@ pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #func
 
-        #[::rig::__linkme::distributed_slice(::rig::registry::RIG_GLOBAL_SETUP)]
-        #[linkme(crate = ::rig::__linkme)]
-        static __RIG_GLOBAL_SETUP: ::rig::registry::GlobalSetupEntry =
-            ::rig::registry::GlobalSetupEntry {
+        #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_GLOBAL_SETUP)]
+        #[linkme(crate = ::rigtest::__linkme)]
+        static __RIGTEST_GLOBAL_SETUP: ::rigtest::registry::GlobalSetupEntry =
+            ::rigtest::registry::GlobalSetupEntry {
                 setup_fn: || {
                     ::std::boxed::Box::pin(async {
                         ::std::boxed::Box::new(#func_ident().await)
@@ -127,13 +127,13 @@ pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 serialize_fn: |boxed| {
                     let concrete = boxed
                         .downcast_ref::<#return_type>()
-                        .expect("cargo-rig: global_setup serialize type mismatch");
-                    ::rig::__serde_json::to_string(concrete)
-                        .expect("cargo-rig: failed to serialize global state")
+                        .expect("cargo-rigtest: global_setup serialize type mismatch");
+                    ::rigtest::__serde_json::to_string(concrete)
+                        .expect("cargo-rigtest: failed to serialize global state")
                 },
                 deserialize_fn: |s| {
-                    let concrete = ::rig::__serde_json::from_str::<#return_type>(s)
-                        .expect("cargo-rig: failed to deserialize global state");
+                    let concrete = ::rigtest::__serde_json::from_str::<#return_type>(s)
+                        .expect("cargo-rigtest: failed to deserialize global state");
                     ::std::boxed::Box::new(concrete)
                         as ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>
                 },
@@ -143,7 +143,7 @@ pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Registers an async global teardown function with the cargo-rig runtime.
+/// Registers an async global teardown function with the cargo-rigtest runtime.
 ///
 /// The annotated function must have the signature:
 /// ```ignore
@@ -178,10 +178,10 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #func
 
-        #[::rig::__linkme::distributed_slice(::rig::registry::RIG_GLOBAL_TEARDOWN)]
-        #[linkme(crate = ::rig::__linkme)]
-        static __RIG_GLOBAL_TEARDOWN: ::rig::registry::GlobalTeardownEntry =
-            ::rig::registry::GlobalTeardownEntry {
+        #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_GLOBAL_TEARDOWN)]
+        #[linkme(crate = ::rigtest::__linkme)]
+        static __RIGTEST_GLOBAL_TEARDOWN: ::rigtest::registry::GlobalTeardownEntry =
+            ::rigtest::registry::GlobalTeardownEntry {
                 teardown_fn: |boxed| {
                     ::std::boxed::Box::pin(async move {
                         let concrete = *boxed

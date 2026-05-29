@@ -1,6 +1,6 @@
 [package]
-name = "rig"
-description = "Runtime library for the cargo-rig test framework"
+name = "rigtest"
+description = "Runtime library for the cargo-rigtest test framework"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-rig-macros = { path = "../rig-macros" }
+rigtest-macros = { path = "../rigtest-macros" }
 tokio = { workspace = true }
 linkme = { workspace = true }
 clap = { workspace = true }

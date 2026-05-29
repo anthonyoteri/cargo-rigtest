@@ -1,11 +1,11 @@
 [package]
-name = "rig-example-basic"
+name = "rigtest-example-basic"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [dev-dependencies]
-rig = { path = "../../rig-runtime", features = ["http-client"] }
+rigtest = { path = "../../rigtest-runtime", features = ["http-client"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 

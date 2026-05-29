@@ -1,21 +1,21 @@
-# cargo-rig
+# cargo-rigtest
 
-[![CI](https://github.com/anthonyoteri/cargo-rig/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/anthonyoteri/cargo-rig/actions/workflows/ci.yml)
-[![rig on crates.io](https://img.shields.io/crates/v/rig.svg?label=rig)](https://crates.io/crates/rig)
-[![cargo-rig on crates.io](https://img.shields.io/crates/v/cargo-rig.svg?label=cargo-rig)](https://crates.io/crates/cargo-rig)
-[![docs.rs](https://img.shields.io/docsrs/rig?label=docs.rs)](https://docs.rs/rig)
+[![CI](https://github.com/anthonyoteri/cargo-rigtest/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/anthonyoteri/cargo-rigtest/actions/workflows/ci.yml)
+[![rigtest on crates.io](https://img.shields.io/crates/v/rigtest.svg?label=rigtest)](https://crates.io/crates/rigtest)
+[![cargo-rigtest on crates.io](https://img.shields.io/crates/v/cargo-rigtest.svg?label=cargo-rigtest)](https://crates.io/crates/cargo-rigtest)
+[![docs.rs](https://img.shields.io/docsrs/rigtest?label=docs.rs)](https://docs.rs/rigtest)
 [![MSRV: 1.87](https://img.shields.io/badge/rustc-1.87+-orange.svg)](https://blog.rust-lang.org/2025/05/15/Rust-1.87.0.html)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/anthonyoteri/cargo-rig#license)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/anthonyoteri/cargo-rigtest#license)
 
 A Cargo plugin for infrastructure and acceptance testing in Rust.
 
-cargo-rig runs each test in its own subprocess, giving you process-level isolation, parallel execution, structured output, and first-class support for shared infrastructure setup — without the overhead of spinning up a full test harness.
+cargo-rigtest runs each test in its own subprocess, giving you process-level isolation, parallel execution, structured output, and first-class support for shared infrastructure setup — without the overhead of spinning up a full test harness.
 
 ---
 
 ## Overview
 
-cargo-rig is designed for the layer of tests that sit above unit tests: API integration tests, service smoke tests, environment verification, end-to-end workflows. It is not a replacement for `#[test]` — it is a complement to it.
+cargo-rigtest is designed for the layer of tests that sit above unit tests: API integration tests, service smoke tests, environment verification, end-to-end workflows. It is not a replacement for `#[test]` — it is a complement to it.
 
 Key properties:
 
@@ -25,7 +25,7 @@ Key properties:
 - Per-test setup and teardown hooks are available via `TestContext`
 - Tests can be marked `serial`, given a `timeout`, or configured to `retry` on failure
 - Output is captured per-test and printed only on failure, nextest-style
-- A `rig::skip!` macro lets tests opt out at runtime with a reason
+- A `rigtest::skip!` macro lets tests opt out at runtime with a reason
 
 ---
 
@@ -34,14 +34,14 @@ Key properties:
 Install the Cargo plugin:
 
 ```
-cargo install cargo-rig
+cargo install cargo-rigtest
 ```
 
 Add the runtime library to your project:
 
 ```toml
 [dev-dependencies]
-rig = "0.1"
+rigtest = "0.1"
 ```
 
 ### Optional features
@@ -52,7 +52,7 @@ rig = "0.1"
 
 ```toml
 [dev-dependencies]
-rig = { version = "0.1", features = ["http-client"] }
+rigtest = { version = "0.1", features = ["http-client"] }
 ```
 
 ---
@@ -74,7 +74,7 @@ harness = false
 
 ```rust
 use std::sync::Arc;
-use rig::prelude::*;
+use rigtest::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -104,14 +104,14 @@ async fn homepage_returns_200(
 }
 
 fn main() {
-    rig::run_main();
+    rigtest::run_main();
 }
 ```
 
 ### 3. Run
 
 ```
-cargo rig run
+cargo rigtest run
 ```
 
 ---
@@ -216,7 +216,7 @@ async fn creates_a_record(
 
 ## Skipping tests
 
-Use `rig::skip!` to skip a test at runtime with an optional reason:
+Use `rigtest::skip!` to skip a test at runtime with an optional reason:
 
 ```rust
 #[testcase]
@@ -224,7 +224,7 @@ async fn requires_live_database(
     _ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if std::env::var("DATABASE_URL").is_err() {
-        rig::skip!("DATABASE_URL not set");
+        rigtest::skip!("DATABASE_URL not set");
     }
     // ...
     Ok(())
@@ -238,7 +238,7 @@ Skipped tests appear in the summary as `SKIP` and do not count as failures.
 ## Running tests
 
 ```
-cargo rig run [OPTIONS]
+cargo rigtest run [OPTIONS]
 ```
 
 | Flag | Description |
@@ -253,14 +253,14 @@ cargo rig run [OPTIONS]
 The seed is printed at the start of every run so a failing order can be reproduced exactly:
 
 ```
-cargo rig run --seed 12345678
+cargo rigtest run --seed 12345678
 ```
 
 ---
 
 ## Output
 
-cargo-rig produces nextest-style output. In a TTY, running tests show live spinners; results are printed as they complete:
+cargo-rigtest produces nextest-style output. In a TTY, running tests show live spinners; results are printed as they complete:
 
 ```
 ── global setup
@@ -283,15 +283,15 @@ In CI or piped output, spinners are replaced with plain lines so no output is lo
 
 ## Multiple test targets
 
-If a package has more than one rig test target, all of them are discovered and run in sequence automatically:
+If a package has more than one rigtest test target, all of them are discovered and run in sequence automatically:
 
 ```
-cargo rig run                        # run all rig targets
-cargo rig run --test smoke           # run one
-cargo rig run --test smoke --test e2e  # run two
+cargo rigtest run                          # run all rigtest targets
+cargo rigtest run --test smoke             # run one
+cargo rigtest run --test smoke --test e2e  # run two
 ```
 
-cargo-rig identifies rig test targets automatically and ignores any other `harness = false` binaries in the package.
+cargo-rigtest identifies rigtest test targets automatically and ignores any other `harness = false` binaries in the package.
 
 ---
 
@@ -299,8 +299,8 @@ cargo-rig identifies rig test targets automatically and ignores any other `harne
 
 | Crate | Description |
 |-------|-------------|
-| `cargo-rig` | The `cargo rig` CLI plugin |
-| `rig` | Runtime library — add this to `[dev-dependencies]` |
+| `cargo-rigtest` | The `cargo rigtest` CLI plugin |
+| `rigtest` | Runtime library — add this to `[dev-dependencies]` |
 
 ---
 

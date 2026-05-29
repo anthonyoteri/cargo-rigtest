@@ -1,5 +1,5 @@
 [package]
-name = "cargo-rig"
+name = "cargo-rigtest"
 description = "Cargo plugin for running infrastructure and acceptance tests"
 version.workspace = true
 edition.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "cargo-rig"
+name = "cargo-rigtest"
 path = "src/main.rs"
 
 [dependencies]

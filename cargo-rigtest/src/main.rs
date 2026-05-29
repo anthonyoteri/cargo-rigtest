@@ -20,7 +20,7 @@ struct Cargo {
 #[derive(Subcommand)]
 enum CargoSubcommand {
     /// Rust infrastructure and acceptance test runner
-    Rig(RigArgs),
+    Rigtest(RigArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -65,7 +65,7 @@ struct RunArgs {
 
 fn main() -> anyhow::Result<()> {
     let Cargo {
-        subcommand: CargoSubcommand::Rig(rig_args),
+        subcommand: CargoSubcommand::Rigtest(rig_args),
     } = Cargo::parse();
 
     match rig_args.command {
@@ -119,9 +119,9 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
 
     if rig_targets.is_empty() {
         return Err(anyhow!(
-            "no rig test targets found. \
+            "no rigtest test targets found. \
              Make sure at least one [[test]] target in Cargo.toml has \
-             harness = false and calls rig::run_main()."
+             harness = false and calls rigtest::run_main()."
         ));
     }
 
@@ -155,7 +155,7 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
     let mut last_code = 0i32;
 
     for (name, executable) in &targets {
-        println!("cargo-rig: running '{name}'");
+        println!("cargo-rigtest: running '{name}'");
 
         let mut test_cmd = Command::new(executable);
 

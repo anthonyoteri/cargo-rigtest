@@ -1,6 +1,6 @@
 [package]
-name = "rig-macros"
-description = "Procedural macros for the cargo-rig test framework"
+name = "rigtest-macros"
+description = "Procedural macros for the cargo-rigtest test framework"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
