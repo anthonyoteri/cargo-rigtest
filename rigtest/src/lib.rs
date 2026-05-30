@@ -25,15 +25,13 @@
 //!
 //! A minimal test file:
 //!
-//! ```ignore
+//! ```no_run
 //! use std::sync::Arc;
 //! use rigtest::prelude::*;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize, Deserialize)]
-//! struct State {
-//!     base_url: String,
-//! }
+//! struct State { base_url: String }
 //!
 //! #[global_setup]
 //! async fn setup() -> State {
@@ -53,9 +51,7 @@
 //!     Ok(())
 //! }
 //!
-//! fn main() {
-//!     rigtest::run_main();
-//! }
+//! fn main() { rigtest::run_main(); }
 //! ```
 //!
 //! Run the suite with:
@@ -86,7 +82,10 @@
 //! Registers an async function as a test case. The function must accept
 //! `Arc<`[`TestContext`]`>` and return `Result<(), `[`Error`]`>`:
 //!
-//! ```ignore
+//! ```no_run
+//! # use std::sync::Arc;
+//! # use rigtest::TestContext;
+//! # use rigtest::testcase;
 //! #[testcase]
 //! async fn my_test(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
 //!     Ok(())
@@ -95,7 +94,10 @@
 //!
 //! Optional flags can be combined in any order:
 //!
-//! ```ignore
+//! ```no_run
+//! # use std::sync::Arc;
+//! # use rigtest::TestContext;
+//! # use rigtest::testcase;
 //! #[testcase(serial, timeout = std::time::Duration::from_secs(30), retries = 2)]
 //! async fn careful_test(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
 //!     Ok(())
@@ -114,7 +116,11 @@
 //! and passed to every test subprocess as the global state. At most one may be
 //! defined.
 //!
-//! ```ignore
+//! ```no_run
+//! # use serde::{Serialize, Deserialize};
+//! # use rigtest::global_setup;
+//! # #[derive(Serialize, Deserialize)]
+//! # struct MyState { db_url: String }
 //! #[global_setup]
 //! async fn setup() -> MyState {
 //!     MyState { db_url: std::env::var("DATABASE_URL").unwrap() }
@@ -132,10 +138,14 @@
 //! Runs once after all tests finish. Receives the deserialized state produced
 //! by `#[global_setup]`. At most one may be defined.
 //!
-//! ```ignore
+//! ```no_run
+//! # use serde::{Serialize, Deserialize};
+//! # use rigtest::global_teardown;
+//! # #[derive(Serialize, Deserialize)]
+//! # struct MyState { db_url: String }
 //! #[global_teardown]
 //! async fn teardown(state: MyState) {
-//!     MyDb::connect(&state.db_url).await.unwrap().drop_schema().await;
+//!     println!("cleaning up {}", state.db_url);
 //! }
 //! ```
 //!
@@ -157,12 +167,24 @@
 //! - **`client`** — a shared `reqwest::Client` when the `http-client`
 //!   feature is enabled.
 //!
-//! ```ignore
+//! ```no_run
+//! # use std::sync::Arc;
+//! # use serde::{Serialize, Deserialize};
+//! # use rigtest::{TestContext, testcase, Error};
+//! # #[derive(Serialize, Deserialize)]
+//! # struct State { db_url: String }
+//! # struct Conn;
+//! # impl Conn {
+//! #     async fn insert(&mut self, _: &str) -> Result<(), Error> { Ok(()) }
+//! #     async fn count(&self) -> Result<usize, Error> { Ok(1) }
+//! #     async fn rollback(self) -> Result<(), Error> { Ok(()) }
+//! # }
+//! # async fn db_connect(_: &str) -> Result<Conn, Error> { Ok(Conn) }
 //! #[testcase]
 //! async fn creates_record(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
-//!     let conn = ctx.setup(|global| async move {
+//!     let mut conn = ctx.setup(|global| async move {
 //!         let state = global.downcast_ref::<State>().unwrap();
-//!         MyDb::connect(&state.db_url).await
+//!         db_connect(&state.db_url).await
 //!     }).await?;
 //!
 //!     conn.insert("hello").await?;
@@ -181,7 +203,9 @@
 //!
 //! Use [`skip!`] to bail out of a test at runtime with an optional reason:
 //!
-//! ```ignore
+//! ```no_run
+//! # use std::sync::Arc;
+//! # use rigtest::{TestContext, testcase};
 //! #[testcase]
 //! async fn requires_db(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
 //!     if std::env::var("DATABASE_URL").is_err() {
@@ -207,7 +231,7 @@
 //! an orchestrator or a single-test subprocess depending on how it was
 //! invoked.
 //!
-//! ```ignore
+//! ```no_run
 //! fn main() {
 //!     rigtest::run_main();
 //! }
@@ -231,7 +255,7 @@ pub use scheduler::RuntimeArgs;
 
 /// Convenient glob import for test files.
 ///
-/// ```ignore
+/// ```no_run
 /// use rigtest::prelude::*;
 /// ```
 ///
@@ -255,7 +279,7 @@ pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```no_run
 /// use std::sync::Arc;
 /// use rigtest::{testcase, TestContext};
 ///
@@ -298,7 +322,7 @@ impl std::error::Error for Skip {}
 ///
 /// Skip when an environment variable is absent:
 ///
-/// ```ignore
+/// ```no_run
 /// use std::sync::Arc;
 /// use rigtest::{testcase, TestContext};
 ///
@@ -314,7 +338,9 @@ impl std::error::Error for Skip {}
 ///
 /// Skip unconditionally (no message):
 ///
-/// ```ignore
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use rigtest::{testcase, TestContext};
 /// #[testcase]
 /// async fn not_yet_implemented(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
 ///     rigtest::skip!();
