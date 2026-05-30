@@ -87,10 +87,10 @@ impl TestContext {
     /// # Teardown and timeout
     ///
     /// If the test is killed by a `timeout` set on `#[testcase]`, this
-    /// closure will **not** run — the entire subprocess is hard-killed before
+    /// closure will **not** run — the entire subprocess is terminated before
     /// it has a chance to execute. Resources that must be released regardless
-    /// of outcome should use RAII guards (e.g. `Drop` impls) or be managed in
-    /// `#[global_teardown]`.
+    /// of outcome should be managed in `#[global_teardown]`, which runs in
+    /// the coordinator process outside the killed subprocess.
     pub async fn teardown<F, Fut>(&self, f: F) -> Result<(), crate::Error>
     where
         F: FnOnce(Arc<Box<dyn Any + Send + Sync>>) -> Fut,
