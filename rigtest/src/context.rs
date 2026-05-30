@@ -41,11 +41,19 @@ impl TestContext {
     /// On error or panic the test fails with a `"setup failed:"` / `"setup
     /// panicked"` prefix so the phase is unambiguous in the report.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use rigtest::{TestContext, Error};
+    /// # struct Config { db_url: String }
+    /// # struct Conn;
+    /// # async fn db_connect(_: &str) -> Result<Conn, Error> { Ok(Conn) }
+    /// # async fn example(ctx: Arc<TestContext>) -> Result<(), Error> {
     /// let conn = ctx.setup(|global| async move {
     ///     let cfg = global.downcast_ref::<Config>().unwrap();
-    ///     MyDb::connect(&cfg.db_url).await   // ? works naturally
+    ///     db_connect(&cfg.db_url).await
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors
@@ -73,11 +81,21 @@ impl TestContext {
     /// failed:"` / `"teardown panicked"`, distinct from failures in the test
     /// body.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use rigtest::{TestContext, Error};
+    /// # struct Config { pool: String }
+    /// # struct Conn;
+    /// # impl Conn {
+    /// #     async fn release_back_to(self, _: &str) -> Result<(), Error> { Ok(()) }
+    /// # }
+    /// # async fn example(ctx: Arc<TestContext>, conn: Conn) -> Result<(), Error> {
     /// ctx.teardown(|global| async move {
     ///     let cfg = global.downcast_ref::<Config>().unwrap();
-    ///     conn.release_back_to(&cfg.pool).await   // ? works naturally
+    ///     conn.release_back_to(&cfg.pool).await
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors
