@@ -41,11 +41,19 @@ impl TestContext {
     /// On error or panic the test fails with a `"setup failed:"` / `"setup
     /// panicked"` prefix so the phase is unambiguous in the report.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use rigtest::{TestContext, Error};
+    /// # struct Config { db_url: String }
+    /// # struct Conn;
+    /// # async fn db_connect(_: &str) -> Result<Conn, Error> { Ok(Conn) }
+    /// # async fn example(ctx: Arc<TestContext>) -> Result<(), Error> {
     /// let conn = ctx.setup(|global| async move {
     ///     let cfg = global.downcast_ref::<Config>().unwrap();
-    ///     MyDb::connect(&cfg.db_url).await   // ? works naturally
+    ///     db_connect(&cfg.db_url).await
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors
@@ -73,11 +81,21 @@ impl TestContext {
     /// failed:"` / `"teardown panicked"`, distinct from failures in the test
     /// body.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use rigtest::{TestContext, Error};
+    /// # struct Config { pool: String }
+    /// # struct Conn;
+    /// # impl Conn {
+    /// #     async fn release_back_to(self, _: &str) -> Result<(), Error> { Ok(()) }
+    /// # }
+    /// # async fn example(ctx: Arc<TestContext>, conn: Conn) -> Result<(), Error> {
     /// ctx.teardown(|global| async move {
     ///     let cfg = global.downcast_ref::<Config>().unwrap();
-    ///     conn.release_back_to(&cfg.pool).await   // ? works naturally
+    ///     conn.release_back_to(&cfg.pool).await
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors
@@ -87,10 +105,10 @@ impl TestContext {
     /// # Teardown and timeout
     ///
     /// If the test is killed by a `timeout` set on `#[testcase]`, this
-    /// closure will **not** run — the entire subprocess is hard-killed before
+    /// closure will **not** run — the entire subprocess is terminated before
     /// it has a chance to execute. Resources that must be released regardless
-    /// of outcome should use RAII guards (e.g. `Drop` impls) or be managed in
-    /// `#[global_teardown]`.
+    /// of outcome should be managed in `#[global_teardown]`, which runs in
+    /// the coordinator process outside the killed subprocess.
     pub async fn teardown<F, Fut>(&self, f: F) -> Result<(), crate::Error>
     where
         F: FnOnce(Arc<Box<dyn Any + Send + Sync>>) -> Fut,

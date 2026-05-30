@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dev-dependencies]
-rigtest = { path = "../../rigtest-runtime" }
+rigtest = { path = "../../rigtest" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 
