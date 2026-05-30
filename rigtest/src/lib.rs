@@ -232,6 +232,7 @@
 //! invoked.
 //!
 //! ```no_run
+//! # #![allow(clippy::needless_doctest_main)]
 //! fn main() {
 //!     rigtest::run_main();
 //! }

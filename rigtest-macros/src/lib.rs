@@ -62,12 +62,11 @@ use syn::Pat;
 ///
 /// # Timeout and teardown
 ///
-/// When a `timeout` fires the test subprocess is hard-killed. Any teardown
+/// When a `timeout` fires the test subprocess is terminated. Any teardown
 /// registered with `TestContext::teardown` will **not** run. Resources that
-/// must be released regardless of outcome (open connections, temp files, etc.)
-/// should be managed at a higher level — for example in `#[global_teardown]`,
-/// via OS-level cleanup (`Drop` impls, RAII guards), or by an external fixture
-/// that outlives the test process.
+/// must be released regardless of outcome should be managed in
+/// `#[global_teardown]`, which runs in the coordinator process outside the
+/// killed subprocess.
 #[proc_macro_attribute]
 pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
