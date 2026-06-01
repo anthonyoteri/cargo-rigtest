@@ -56,7 +56,11 @@ async fn async_sleep(
 async fn builds_http_request(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let request = ctx.client.get("http://example.invalid/health").build();
+    let request = ctx
+        .client()
+        .await?
+        .get("http://example.invalid/health")
+        .build();
     assert!(request.is_ok(), "building a GET request should succeed");
     Ok(())
 }
