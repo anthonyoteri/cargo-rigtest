@@ -17,18 +17,50 @@ use syn::Pat;
 ///
 /// # Usage
 ///
+/// Basic usage:
+///
 /// ```ignore
 /// #[rigtest::main]
 /// fn main() {}
 /// ```
+///
+/// With HTTP client configuration (requires the `http-client` feature):
+///
+/// ```ignore
+/// #[rigtest::main(http_client = configure_client)]
+/// fn main() {}
+///
+/// fn configure_client(
+///     builder: reqwest::ClientBuilder,
+/// ) -> Result<reqwest::ClientBuilder, rigtest::Error> {
+///     Ok(builder.danger_accept_invalid_certs(true))
+/// }
+/// ```
+///
+/// # HTTP client configure function
+///
+/// The function named by `http_client` must have the signature:
+///
+/// ```text
+/// fn(reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, rigtest::Error>
+/// ```
+///
+/// It receives a fresh `ClientBuilder`, applies any customisation, and returns
+/// it wrapped in `Ok`. Returning `Err` causes every test subprocess to fail
+/// immediately with the error message before any test logic runs. Configurations
+/// that cannot fail should still wrap the builder in `Ok(...)` — the `Result`
+/// return type is required so that fallible operations (such as loading a
+/// certificate from disk) can be supported without a breaking API change.
 ///
 /// # Compile errors
 ///
 /// - The function must be named `main`.
 /// - The function must take no arguments.
 /// - The function body must be empty.
+/// - The `http_client` parameter requires `rigtest` to be compiled with the
+///   `http-client` feature; omitting it causes a missing-type compile error.
 #[proc_macro_attribute]
-pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
 
     if func.sig.ident != "main" {
@@ -52,18 +84,59 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
     if !func.block.stmts.is_empty() {
         return syn::Error::new_spanned(
             &func.block,
-            "#[rigtest::main] `fn main()` body must be empty",
+            "#[rigtest::main] `fn main()` body must be empty — place configuration in a separate function referenced by the `http_client` parameter",
         )
         .to_compile_error()
         .into();
     }
 
-    let expanded = quote! {
-        fn main() {
-            ::rigtest::run_main();
-        }
+    let metas = match syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse(attr)
+    {
+        Ok(m) => m,
+        Err(e) => return e.to_compile_error().into(),
     };
-    TokenStream::from(expanded)
+
+    let mut http_client_fn: Option<syn::Expr> = None;
+
+    for meta in &metas {
+        match meta {
+            syn::Meta::NameValue(nv) if nv.path.is_ident("http_client") => {
+                http_client_fn = Some(nv.value.clone());
+            }
+            other => {
+                return syn::Error::new_spanned(
+                    other,
+                    "unknown parameter for #[rigtest::main]; expected `http_client = <fn>`",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    }
+
+    if let Some(configure_fn) = http_client_fn {
+        let expanded = quote! {
+            fn main() {
+                ::rigtest::run_main();
+            }
+
+            #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_HTTP_CLIENT_CONFIGURATOR)]
+            #[linkme(crate = ::rigtest::__linkme)]
+            static __RIGTEST_HTTP_CLIENT_CONFIGURATOR: ::rigtest::registry::HttpClientConfiguratorEntry =
+                ::rigtest::registry::HttpClientConfiguratorEntry {
+                    configure_fn: #configure_fn,
+                };
+        };
+        TokenStream::from(expanded)
+    } else {
+        let expanded = quote! {
+            fn main() {
+                ::rigtest::run_main();
+            }
+        };
+        TokenStream::from(expanded)
+    }
 }
 
 /// Registers an async function as a cargo-rigtest test case.

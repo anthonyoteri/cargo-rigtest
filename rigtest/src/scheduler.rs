@@ -161,6 +161,12 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         "cargo-rigtest: at most one #[global_teardown] function may be defined, found {}",
         RIG_GLOBAL_TEARDOWN.len()
     );
+    #[cfg(feature = "http-client")]
+    assert!(
+        crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR.len() <= 1,
+        "cargo-rigtest: at most one #[rigtest::main(http_client = …)] may be defined, found {}",
+        crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR.len()
+    );
 
     let reporter = Arc::new(Reporter::new());
 
@@ -510,7 +516,8 @@ async fn run_single_test(test_name: &str, state_var: Option<&str>) -> anyhow::Re
         .find(|tc| tc.name == test_name)
         .ok_or_else(|| anyhow!("cargo-rigtest: no test named '{test_name}'"))?;
 
-    let ctx = TestContext::new(global_data);
+    let ctx = TestContext::new(global_data)
+        .map_err(|e| anyhow!("failed to configure HTTP client: {e}"))?;
 
     let result = std::panic::AssertUnwindSafe((tc.test_fn)(ctx))
         .catch_unwind()

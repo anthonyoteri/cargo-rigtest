@@ -21,13 +21,31 @@ impl TestContext {
     /// before invoking the test function. Test authors receive an already-constructed
     /// `Arc<TestContext>` as the argument to their test function and do not call
     /// this directly.
-    #[must_use]
-    pub fn new(global_data: Box<dyn Any + Send + Sync>) -> Arc<Self> {
-        Arc::new(Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `http-client` feature is enabled, an
+    /// `http_client` configurator was registered via
+    /// `#[rigtest::main(http_client = …)]`, and its configure function returns
+    /// an error or the resulting `reqwest::ClientBuilder` fails to build.
+    pub fn new(global_data: Box<dyn Any + Send + Sync>) -> Result<Arc<Self>, crate::Error> {
+        #[cfg(feature = "http-client")]
+        let client = {
+            let builder = reqwest::ClientBuilder::new();
+            let builder = if let Some(entry) = crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR.first()
+            {
+                (entry.configure_fn)(builder)?
+            } else {
+                builder
+            };
+            builder.build()?
+        };
+
+        Ok(Arc::new(Self {
             global_data: Arc::new(global_data),
             #[cfg(feature = "http-client")]
-            client: reqwest::Client::new(),
-        })
+            client,
+        }))
     }
 
     /// Run per-test setup logic and return its result.
