@@ -3,15 +3,16 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures::FutureExt;
+#[cfg(feature = "http-client")]
+use tokio::sync::OnceCell;
 
 /// Shared context passed to every test function.
 pub struct TestContext {
     /// Data produced by `#[global_setup]`, available to all tests.
     pub global_data: Arc<Box<dyn Any + Send + Sync>>,
-    /// A reusable HTTP client for tests that make network calls.
-    /// Available when the `http-client` feature is enabled.
+    /// Lazily-initialized HTTP client. Built on first call to [`Self::client`].
     #[cfg(feature = "http-client")]
-    pub client: reqwest::Client,
+    client: OnceCell<reqwest::Client>,
 }
 
 impl TestContext {
@@ -24,28 +25,44 @@ impl TestContext {
     ///
     /// # Errors
     ///
-    /// Returns an error if the `http-client` feature is enabled, an
-    /// `http_client` configurator was registered via
-    /// `#[rigtest::main(http_client = …)]`, and its configure function returns
-    /// an error or the resulting `reqwest::ClientBuilder` fails to build.
+    /// Returns an error if an internal invariant is violated during construction.
     pub fn new(global_data: Box<dyn Any + Send + Sync>) -> Result<Arc<Self>, crate::Error> {
-        #[cfg(feature = "http-client")]
-        let client = {
-            let builder = reqwest::ClientBuilder::new();
-            let builder = if let Some(entry) = crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR.first()
-            {
-                (entry.configure_fn)(builder)?
-            } else {
-                builder
-            };
-            builder.build()?
-        };
-
         Ok(Arc::new(Self {
             global_data: Arc::new(global_data),
             #[cfg(feature = "http-client")]
-            client,
+            client: OnceCell::new(),
         }))
+    }
+
+    /// Returns a reference to the shared HTTP client, constructing it on first call.
+    ///
+    /// The client is built lazily so that tests which skip before making any
+    /// network calls do not pay the TLS initialization cost.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `http_client` configurator registered via
+    /// `#[rigtest::main(http_client = …)]` returns an error, or if
+    /// `reqwest::ClientBuilder::build` fails.
+    /// # Errors
+    ///
+    /// Returns an error if the `http_client` configurator registered via
+    /// `#[rigtest::main(http_client = …)]` returns an error, or if
+    /// `reqwest::ClientBuilder::build` fails.
+    #[cfg(feature = "http-client")]
+    pub async fn client(&self) -> Result<&reqwest::Client, crate::Error> {
+        self.client
+            .get_or_try_init(|| async {
+                let builder = reqwest::ClientBuilder::new();
+                let builder =
+                    if let Some(entry) = crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR.first() {
+                        (entry.configure_fn)(builder)?
+                    } else {
+                        builder
+                    };
+                Ok(builder.build()?)
+            })
+            .await
     }
 
     /// Run per-test setup logic and return its result.

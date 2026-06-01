@@ -39,7 +39,7 @@ async fn builds_request_to_https_endpoint(
         .expect("global_data should be SharedState");
 
     let url = format!("{}/health", state.base_url);
-    let request = ctx.client.get(&url).build();
+    let request = ctx.client().await?.get(&url).build();
     assert!(request.is_ok(), "building a GET request should succeed");
     Ok(())
 }
