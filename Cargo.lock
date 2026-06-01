@@ -1226,7 +1226,6 @@ dependencies = [
  "rigtest-macros",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
 ]
 
