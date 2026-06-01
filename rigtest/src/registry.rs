@@ -123,3 +123,31 @@ pub static RIG_GLOBAL_SETUP: [GlobalSetupEntry];
 /// The runtime asserts at startup that this slice contains zero or one element.
 #[linkme::distributed_slice]
 pub static RIG_GLOBAL_TEARDOWN: [GlobalTeardownEntry];
+
+/// An HTTP client configurator registered at compile time via
+/// `#[rigtest::main(http_client = fn_name)]`.
+///
+/// At most one entry may exist per test binary. When present, the runtime calls
+/// [`configure_fn`] with a fresh [`reqwest::ClientBuilder`] before each test
+/// subprocess runs, and uses the returned builder to construct `ctx.client`.
+///
+/// [`configure_fn`]: HttpClientConfiguratorEntry::configure_fn
+#[cfg(feature = "http-client")]
+pub struct HttpClientConfiguratorEntry {
+    /// Calls the user's configure function, returning a modified builder or an error.
+    ///
+    /// On error the test subprocess exits with a descriptive message before
+    /// running any test logic.
+    pub configure_fn: fn(reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, BoxError>,
+}
+
+#[cfg(feature = "http-client")]
+unsafe impl Sync for HttpClientConfiguratorEntry {}
+
+/// At most one HTTP client configurator, registered via
+/// `#[rigtest::main(http_client = fn_name)]`.
+///
+/// The runtime asserts at startup that this slice contains zero or one element.
+#[cfg(feature = "http-client")]
+#[linkme::distributed_slice]
+pub static RIG_HTTP_CLIENT_CONFIGURATOR: [HttpClientConfiguratorEntry];
