@@ -61,6 +61,5 @@ async fn builds_http_request(
     Ok(())
 }
 
-fn main() {
-    rigtest::run_main();
-}
+#[rigtest::main]
+fn main() {}

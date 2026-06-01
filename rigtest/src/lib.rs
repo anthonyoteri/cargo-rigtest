@@ -52,7 +52,8 @@
 //!     Ok(())
 //! }
 //!
-//! fn main() { rigtest::run_main(); }
+//! #[rigtest::main]
+//! fn main() {}
 //! ```
 //!
 //! Run the suite with:
@@ -228,17 +229,18 @@
 //!
 //! # Entry point
 //!
-//! Every test binary must call [`run_main`] from `fn main()`. This is the
-//! hook that lets the `cargo rigtest` coordinator drive the binary as either
-//! an orchestrator or a single-test subprocess depending on how it was
-//! invoked.
+//! Every test binary needs an entry point that lets the `cargo rigtest`
+//! coordinator drive the binary as either an orchestrator or a single-test
+//! subprocess depending on how it was invoked. The recommended way is the
+//! [`#[rigtest::main]`][`main`] attribute:
 //!
 //! ```no_run
-//! # #![allow(clippy::needless_doctest_main)]
-//! fn main() {
-//!     rigtest::run_main();
-//! }
+//! #[rigtest::main]
+//! fn main() {}
 //! ```
+//!
+//! [`run_main`] remains available for compatibility with the older
+//! `fn main() { rigtest::run_main(); }` pattern.
 //!
 //! [`cargo-rigtest`]: https://crates.io/crates/cargo-rigtest
 
@@ -253,7 +255,7 @@ pub mod reporter;
 pub mod scheduler;
 
 pub use context::TestContext;
-pub use rigtest_macros::{global_setup, global_teardown, testcase};
+pub use rigtest_macros::{global_setup, global_teardown, main, testcase};
 pub use scheduler::RuntimeArgs;
 
 /// Convenient glob import for test files.
@@ -263,10 +265,10 @@ pub use scheduler::RuntimeArgs;
 /// ```
 ///
 /// Brings into scope: [`TestContext`] and the attribute macros [`testcase`],
-/// [`global_setup`], and [`global_teardown`].
+/// [`global_setup`], [`global_teardown`], and [`main`].
 pub mod prelude {
     pub use crate::TestContext;
-    pub use rigtest_macros::{global_setup, global_teardown, testcase};
+    pub use rigtest_macros::{global_setup, global_teardown, main, testcase};
 }
 
 /// Convenience alias for the error type used by test functions, setup, and
