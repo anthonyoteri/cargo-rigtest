@@ -5,6 +5,16 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.2.0](https://github.com/anthonyoteri/cargo-rigtest/compare/59758892855da5f1af859f69b721296385506056..v0.2.0) - 2026-06-01
+#### Features
+- (**http-client**) add configurable HTTP client via #[rigtest::main(http_client = …)] - ([335a075](https://github.com/anthonyoteri/cargo-rigtest/commit/335a0758a9c1537ccddc08f10258bdc4b29a8c99)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**macros**) add #[rigtest::main] entry-point attribute - ([2ac1fcf](https://github.com/anthonyoteri/cargo-rigtest/commit/2ac1fcf9451df8576a07dd5f6e6e4f8946b5cbee)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Documentation
+- (**rigtest**) add comprehensive module-level documentation - ([ddfaca0](https://github.com/anthonyoteri/cargo-rigtest/commit/ddfaca0d6cb19b6760813284ea68fcc13ac2ed1c)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- rewrite README with motivating use case, features section, and expanded installation guide - ([5975889](https://github.com/anthonyoteri/cargo-rigtest/commit/59758892855da5f1af859f69b721296385506056)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.1.0](https://github.com/anthonyoteri/cargo-rigtest/compare/be1bdbe4e72b08c6865d31905b6c193774b0f6da..v0.1.0) - 2026-05-29
 #### Features
 - implement cargo-rig acceptance test framework - ([be1bdbe](https://github.com/anthonyoteri/cargo-rigtest/commit/be1bdbe4e72b08c6865d31905b6c193774b0f6da)) - [@anthonyoteri](https://github.com/anthonyoteri)
