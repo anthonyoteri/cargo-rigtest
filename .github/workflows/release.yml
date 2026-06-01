@@ -33,7 +33,7 @@ jobs:
 
       - name: Bump version and generate changelog
         id: release
-        uses: cocogitto/cocogitto-action@v4.1.0
+        uses: cocogitto/cocogitto-action@v4.2.0
         with:
           command: bump
           args: --${{ inputs.bump }}
