@@ -110,7 +110,7 @@ rigtest = "0.1"
 ```
 
 If your tests make HTTP calls, enable the `http-client` feature to get a
-pre-built `reqwest::Client` available as `ctx.client` in every test:
+shared `reqwest::Client` via `ctx.client().await?` in every test:
 
 ```toml
 [dev-dependencies]
@@ -162,8 +162,8 @@ async fn homepage_returns_200(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = ctx.global_data.downcast_ref::<State>().unwrap();
-    // ctx.client requires the `http-client` feature
-    let resp = ctx.client.get(&state.base_url).send().await?;
+    // ctx.client() requires the `http-client` feature
+    let resp = ctx.client().await?.get(&state.base_url).send().await?;
     assert_eq!(resp.status(), 200);
     Ok(())
 }
@@ -297,6 +297,14 @@ async fn requires_live_database(
 ```
 
 Skipped tests appear in the summary as `SKIP` and do not count as failures.
+
+---
+
+## HTTP client
+
+Enable the `http-client` feature for a built-in `reqwest::Client` accessible
+via `ctx.client().await?`. See [`examples/http-client`](examples/http-client)
+for a working example including custom TLS configuration.
 
 ---
 

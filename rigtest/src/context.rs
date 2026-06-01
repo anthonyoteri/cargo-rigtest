@@ -36,19 +36,17 @@ impl TestContext {
 
     /// Returns a reference to the shared HTTP client, constructing it on first call.
     ///
-    /// The client is built lazily so that tests which skip before making any
-    /// network calls do not pay the TLS initialization cost.
+    /// The client is built lazily: tests that skip or never make network calls
+    /// pay no TLS initialization cost. To customize the client (e.g. to accept
+    /// self-signed certificates), register a configurator via
+    /// `#[rigtest::main(http_client = your_fn)]` — see the
+    /// [`http-client` example](https://github.com/anthonyoteri/cargo-rigtest/tree/main/examples/http-client)
+    /// for a complete example.
     ///
     /// # Errors
     ///
-    /// Returns an error if the `http_client` configurator registered via
-    /// `#[rigtest::main(http_client = …)]` returns an error, or if
-    /// `reqwest::ClientBuilder::build` fails.
-    /// # Errors
-    ///
-    /// Returns an error if the `http_client` configurator registered via
-    /// `#[rigtest::main(http_client = …)]` returns an error, or if
-    /// `reqwest::ClientBuilder::build` fails.
+    /// Returns an error if the registered `http_client` configurator returns an
+    /// error, or if `reqwest::ClientBuilder::build` fails.
     #[cfg(feature = "http-client")]
     pub async fn client(&self) -> Result<&reqwest::Client, crate::Error> {
         self.client
