@@ -9,6 +9,63 @@ use syn::FnArg;
 use syn::ItemFn;
 use syn::Pat;
 
+/// Marks a `fn main()` as the entry point for a cargo-rigtest test binary.
+///
+/// This is the recommended alternative to writing `fn main() { rigtest::run_main(); }`
+/// by hand. The attributed function must be named `main`, take no arguments, and
+/// have an empty body.
+///
+/// # Usage
+///
+/// ```ignore
+/// #[rigtest::main]
+/// fn main() {}
+/// ```
+///
+/// # Compile errors
+///
+/// - The function must be named `main`.
+/// - The function must take no arguments.
+/// - The function body must be empty.
+#[proc_macro_attribute]
+pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+
+    if func.sig.ident != "main" {
+        return syn::Error::new_spanned(
+            &func.sig.ident,
+            "#[rigtest::main] must be applied to a function named `main`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if !func.sig.inputs.is_empty() {
+        return syn::Error::new_spanned(
+            &func.sig.inputs,
+            "#[rigtest::main] `fn main()` must take no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if !func.block.stmts.is_empty() {
+        return syn::Error::new_spanned(
+            &func.block,
+            "#[rigtest::main] `fn main()` body must be empty",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let expanded = quote! {
+        fn main() {
+            ::rigtest::run_main();
+        }
+    };
+    TokenStream::from(expanded)
+}
+
 /// Registers an async function as a cargo-rigtest test case.
 ///
 /// The annotated function must have the signature:
