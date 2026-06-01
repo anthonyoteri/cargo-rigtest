@@ -5,6 +5,15 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.2.1](https://github.com/anthonyoteri/cargo-rigtest/compare/d61bd7d9ecd9271dc69c279617b60ceba339744e..v0.2.1) - 2026-06-01
+#### Bug Fixes
+- (**http-client**) lazily initialize reqwest::Client on first use - ([06cff3e](https://github.com/anthonyoteri/cargo-rigtest/commit/06cff3e50e1e8946581db5b387f434ef0da84a25)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- exit 0 silently when invoked outside of cargo-rigtest - ([d61bd7d](https://github.com/anthonyoteri/cargo-rigtest/commit/d61bd7d9ecd9271dc69c279617b60ceba339744e)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Documentation
+- (**http-client**) add README section and expand client() inline docs - ([9955946](https://github.com/anthonyoteri/cargo-rigtest/commit/99559460dbb3fe7c17e0556019648e195c501e3a)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.2.0](https://github.com/anthonyoteri/cargo-rigtest/compare/59758892855da5f1af859f69b721296385506056..v0.2.0) - 2026-06-01
 #### Features
 - (**http-client**) add configurable HTTP client via #[rigtest::main(http_client = …)] - ([335a075](https://github.com/anthonyoteri/cargo-rigtest/commit/335a0758a9c1537ccddc08f10258bdc4b29a8c99)) - [@anthonyoteri](https://github.com/anthonyoteri)
