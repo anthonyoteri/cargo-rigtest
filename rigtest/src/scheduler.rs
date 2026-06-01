@@ -56,6 +56,16 @@ pub struct RuntimeArgs {
     /// is a rig test runner before attempting to run it.
     #[arg(long, hide = true)]
     pub rig_probe: bool,
+
+    /// Respond with an empty test list and exit 0. Satisfies the discovery
+    /// protocol used by `cargo nextest` and similar tools.
+    #[arg(long, hide = true)]
+    pub list: bool,
+
+    /// Accepted and ignored so that tools passing `--format terse` (nextest)
+    /// do not cause a parse error.
+    #[arg(long, hide = true)]
+    pub format: Option<String>,
 }
 
 fn apply_filter<'a>(

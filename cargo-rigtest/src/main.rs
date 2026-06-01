@@ -151,6 +151,7 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         println!("cargo-rigtest: running '{name}'");
 
         let mut test_cmd = Command::new(executable);
+        test_cmd.env("CARGO_RIGTEST", "1");
 
         if let Some(jobs) = args.jobs {
             test_cmd.args(["--jobs", &jobs.to_string()]);
