@@ -255,6 +255,8 @@ pub mod reporter;
 pub mod scheduler;
 
 pub use context::TestContext;
+#[cfg(feature = "http-client")]
+pub use reqwest;
 pub use rigtest_macros::{global_setup, global_teardown, main, testcase};
 pub use scheduler::RuntimeArgs;
 
