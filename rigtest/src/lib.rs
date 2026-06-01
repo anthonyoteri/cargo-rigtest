@@ -377,6 +377,17 @@ pub(crate) fn flush_and_exit(code: i32) -> ! {
 ///
 /// Panics if the Tokio multi-thread runtime cannot be initialized.
 pub fn run_main() -> ! {
+    // When invoked by `cargo test` or `cargo nextest` directly (i.e. not via
+    // `cargo rigtest`), treat this binary as having zero tests.  The env var
+    // is set by the `cargo-rigtest` CLI before spawning test binaries;
+    // `--run-single` and `--rig-probe` are set in subprocess / probe mode.
+    let invoked_by_rigtest = std::env::var("CARGO_RIGTEST").is_ok();
+    let has_internal_flag = std::env::args().any(|a| a == "--run-single" || a == "--rig-probe");
+
+    if !invoked_by_rigtest && !has_internal_flag {
+        flush_and_exit(0);
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -385,6 +396,9 @@ pub fn run_main() -> ! {
     let result = runtime.block_on(async {
         let args = <RuntimeArgs as clap::Parser>::parse();
         if args.rig_probe {
+            flush_and_exit(0);
+        }
+        if args.list {
             flush_and_exit(0);
         }
         scheduler::run_suite(args).await
