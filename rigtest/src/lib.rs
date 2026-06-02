@@ -226,6 +226,7 @@
 //! | Feature | Description |
 //! |---------|-------------|
 //! | `http-client` | Adds a shared `reqwest::Client` as `ctx.client`. Omit this feature if you prefer to construct your own HTTP client. |
+//! | `ssh-client` | Adds `ctx.ssh(destination)` for running commands over SSH via [`openssh`](https://crates.io/crates/openssh). **Unix only** — depends on the system `ssh` binary; has no effect on non-Unix targets. |
 //!
 //! # Entry point
 //!
@@ -255,6 +256,8 @@ pub mod reporter;
 pub mod scheduler;
 
 pub use context::TestContext;
+#[cfg(all(feature = "ssh-client", unix))]
+pub use openssh;
 #[cfg(feature = "http-client")]
 pub use reqwest;
 pub use rigtest_macros::{global_setup, global_teardown, main, testcase};
@@ -360,6 +363,37 @@ macro_rules! skip {
     };
     () => {
         return Err(Box::new($crate::Skip(String::new())))
+    };
+}
+
+/// Run a shell command over SSH, returning an [`openssh::Command`] builder.
+///
+/// This is a convenience wrapper around [`TestContext::ssh`]. The command string
+/// is executed via `sh -c`, so shell syntax (pipes, redirects, quoting) works
+/// as expected.
+///
+/// # Platform support
+///
+/// Only available on Unix. Requires the `ssh-client` feature and the system
+/// `ssh` binary on `PATH`. The macro does not compile on non-Unix targets.
+///
+/// # Usage
+///
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use rigtest::{testcase, TestContext};
+/// #[testcase]
+/// async fn remote_hostname(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
+///     let out = rigtest::ssh!(ctx, "user@host", "hostname").output().await?;
+///     assert!(out.status.success());
+///     Ok(())
+/// }
+/// ```
+#[cfg(all(feature = "ssh-client", unix))]
+#[macro_export]
+macro_rules! ssh {
+    ($ctx:expr, $dest:expr, $cmd:expr) => {
+        $ctx.ssh($dest).await?.command("sh").arg("-c").arg($cmd)
     };
 }
 

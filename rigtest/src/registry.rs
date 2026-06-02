@@ -141,6 +141,7 @@ pub struct HttpClientConfiguratorEntry {
     pub configure_fn: fn(reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, BoxError>,
 }
 
+// linkme requires Sync
 #[cfg(feature = "http-client")]
 unsafe impl Sync for HttpClientConfiguratorEntry {}
 
@@ -151,3 +152,37 @@ unsafe impl Sync for HttpClientConfiguratorEntry {}
 #[cfg(feature = "http-client")]
 #[linkme::distributed_slice]
 pub static RIG_HTTP_CLIENT_CONFIGURATOR: [HttpClientConfiguratorEntry];
+
+/// An SSH client configurator registered at compile time via
+/// `#[rigtest::main(ssh_client = fn_name)]`.
+///
+/// At most one entry may exist per test binary. When present, the runtime calls
+/// [`configure_fn`] with the destination string and a fresh [`openssh::SessionBuilder`]
+/// before establishing each SSH connection, and uses the returned builder to connect.
+///
+/// # Platform support
+///
+/// This type is only available on Unix. The `ssh-client` feature depends on
+/// [`openssh`], which requires the system `ssh` binary and is not supported on
+/// non-Unix targets.
+///
+/// [`configure_fn`]: SshClientConfiguratorEntry::configure_fn
+#[cfg(all(feature = "ssh-client", unix))]
+pub struct SshClientConfiguratorEntry {
+    /// Calls the user's configure function with the destination and a fresh builder,
+    /// returning a modified builder or an error.
+    pub configure_fn:
+        fn(&str, openssh::SessionBuilder) -> Result<openssh::SessionBuilder, BoxError>,
+}
+
+// linkme requires Sync
+#[cfg(all(feature = "ssh-client", unix))]
+unsafe impl Sync for SshClientConfiguratorEntry {}
+
+/// At most one SSH client configurator, registered via
+/// `#[rigtest::main(ssh_client = fn_name)]`.
+///
+/// The runtime asserts at startup that this slice contains zero or one element.
+#[cfg(all(feature = "ssh-client", unix))]
+#[linkme::distributed_slice]
+pub static RIG_SSH_CLIENT_CONFIGURATOR: [SshClientConfiguratorEntry];
