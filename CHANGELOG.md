@@ -5,6 +5,13 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.3.0](https://github.com/anthonyoteri/cargo-rigtest/compare/e0e89f8befced8b1d8c2f30c70d944269c83e19d..v0.3.0) - 2026-06-02
+#### Features
+- (**context**) add ctx.global::<T>() typed helper for global state - ([1d8cbc2](https://github.com/anthonyoteri/cargo-rigtest/commit/1d8cbc2d982ad82d18774aa5b51ac22336ea91f4)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**ssh-client**) add ctx.ssh() for cached SSH sessions on Unix - ([e0e89f8](https://github.com/anthonyoteri/cargo-rigtest/commit/e0e89f8befced8b1d8c2f30c70d944269c83e19d)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.2.1](https://github.com/anthonyoteri/cargo-rigtest/compare/d61bd7d9ecd9271dc69c279617b60ceba339744e..v0.2.1) - 2026-06-01
 #### Bug Fixes
 - (**http-client**) lazily initialize reqwest::Client on first use - ([06cff3e](https://github.com/anthonyoteri/cargo-rigtest/commit/06cff3e50e1e8946581db5b387f434ef0da84a25)) - [@anthonyoteri](https://github.com/anthonyoteri)
