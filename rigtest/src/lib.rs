@@ -47,7 +47,7 @@
 //!
 //! #[testcase]
 //! async fn homepage_is_up(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
-//!     let state = ctx.global_data.downcast_ref::<State>().unwrap();
+//!     let state = ctx.global::<State>();
 //!     // make assertions against state.base_url…
 //!     Ok(())
 //! }
@@ -162,7 +162,8 @@
 //! Every test receives an `Arc<`[`TestContext`]`>`. It exposes:
 //!
 //! - **[`global_data`][TestContext::global_data]** — the deserialized global
-//!   state from `#[global_setup]`, accessed via `downcast_ref`.
+//!   state from `#[global_setup]`. Use [`global::<T>()`][TestContext::global]
+//!   for a typed shorthand that avoids the `downcast_ref` / `expect` boilerplate.
 //! - **[`setup`][TestContext::setup] / [`teardown`][TestContext::teardown]** —
 //!   async closures for per-test resource lifecycle. Failures are labelled
 //!   `"setup failed:"` or `"teardown failed:"` in the report so the phase is

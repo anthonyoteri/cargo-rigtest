@@ -93,7 +93,7 @@ async fn exclusive_resource_access(
 async fn respects_configured_max_operand(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let cfg = ctx.global_data.downcast_ref::<State>().unwrap();
+    let cfg = ctx.global::<State>();
     assert_eq!(calculator::add(cfg.max_operand, 1), cfg.max_operand + 1);
     Ok(())
 }

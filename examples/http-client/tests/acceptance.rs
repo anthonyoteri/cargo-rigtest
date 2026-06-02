@@ -33,10 +33,7 @@ fn configure_client(
 async fn builds_request_to_https_endpoint(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ctx
-        .global_data
-        .downcast_ref::<SharedState>()
-        .expect("global_data should be SharedState");
+    let state = ctx.global::<SharedState>();
 
     let url = format!("{}/health", state.base_url);
     let request = ctx.client().await?.get(&url).build();

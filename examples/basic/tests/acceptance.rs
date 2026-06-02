@@ -32,10 +32,7 @@ async fn simple_computation(
 async fn accesses_global_data(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ctx
-        .global_data
-        .downcast_ref::<SharedState>()
-        .expect("global_data should be SharedState");
+    let state = ctx.global::<SharedState>();
     assert!(
         state.base_url.starts_with("http"),
         "base_url should be an HTTP URL, got: {}",

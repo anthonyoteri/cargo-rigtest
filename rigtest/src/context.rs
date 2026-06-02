@@ -111,6 +111,40 @@ impl TestContext {
         Ok(arc)
     }
 
+    /// Returns a reference to the global setup state, downcasting to `T`.
+    ///
+    /// This is a typed shorthand for
+    /// `ctx.global_data.downcast_ref::<T>().expect(…)`. The `global_data`
+    /// field remains public so existing code using `downcast_ref` directly
+    /// continues to compile unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the stored global state is not of type `T`. This indicates a
+    /// programming error — the type passed to `global` must match the type
+    /// returned by `#[global_setup]`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use rigtest::{TestContext, testcase};
+    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # struct State { base_url: String }
+    /// #[testcase]
+    /// async fn homepage_is_up(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
+    ///     let state = ctx.global::<State>();
+    ///     // use state.base_url…
+    ///     Ok(())
+    /// }
+    /// ```
+    #[must_use]
+    pub fn global<T: Any + Send + Sync + 'static>(&self) -> &T {
+        self.global_data
+            .downcast_ref::<T>()
+            .expect("global_data type mismatch: the type passed to ctx.global::<T>() must match the type returned by #[global_setup]")
+    }
+
     /// Run per-test setup logic and return its result.
     ///
     /// The closure receives `global` — the deserialized global state produced

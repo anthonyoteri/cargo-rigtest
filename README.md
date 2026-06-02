@@ -161,7 +161,7 @@ async fn teardown(state: State) {
 async fn homepage_returns_200(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ctx.global_data.downcast_ref::<State>().unwrap();
+    let state = ctx.global::<State>();
     // ctx.client() requires the `http-client` feature
     let resp = ctx.client().await?.get(&state.base_url).send().await?;
     assert_eq!(resp.status(), 200);
