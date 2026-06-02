@@ -30,6 +30,8 @@ console = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+openssh = { workspace = true, optional = true }
 
 [features]
 http-client = ["reqwest"]
+ssh-client = ["openssh"]

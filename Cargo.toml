@@ -1,5 +1,5 @@
 [workspace]
-members = ["cargo-rigtest", "rigtest-macros", "rigtest", "examples/basic", "examples/calculator", "examples/http-client"]
+members = ["cargo-rigtest", "rigtest-macros", "rigtest", "examples/basic", "examples/calculator", "examples/http-client", "examples/ssh-client"]
 resolver = "2"
 
 [workspace.package]
@@ -29,3 +29,4 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 console = "0.16"
+openssh = "0.10"

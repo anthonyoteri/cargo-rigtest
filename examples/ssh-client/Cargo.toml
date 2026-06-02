@@ -1,0 +1,13 @@
+[package]
+name = "rigtest-example-ssh-client"
+version.workspace = true
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+rigtest = { path = "../../rigtest", features = ["ssh-client"] }
+serde = { version = "1", features = ["derive"] }
+
+[[test]]
+name = "acceptance"
+harness = false

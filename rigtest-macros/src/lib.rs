@@ -59,6 +59,9 @@ use syn::Pat;
 /// - The function body must be empty.
 /// - The `http_client` parameter requires `rigtest` to be compiled with the
 ///   `http-client` feature; omitting it causes a missing-type compile error.
+/// - The `ssh_client` parameter requires `rigtest` to be compiled with the
+///   `ssh-client` feature and is only supported on Unix targets. On non-Unix
+///   platforms the generated configurator static is omitted.
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
@@ -98,16 +101,20 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let mut http_client_fn: Option<syn::Expr> = None;
+    let mut ssh_client_fn: Option<syn::Expr> = None;
 
     for meta in &metas {
         match meta {
             syn::Meta::NameValue(nv) if nv.path.is_ident("http_client") => {
                 http_client_fn = Some(nv.value.clone());
             }
+            syn::Meta::NameValue(nv) if nv.path.is_ident("ssh_client") => {
+                ssh_client_fn = Some(nv.value.clone());
+            }
             other => {
                 return syn::Error::new_spanned(
                     other,
-                    "unknown parameter for #[rigtest::main]; expected `http_client = <fn>`",
+                    "unknown parameter for #[rigtest::main]; expected `http_client = <fn>` or `ssh_client = <fn>`",
                 )
                 .to_compile_error()
                 .into();
@@ -115,28 +122,38 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    if let Some(configure_fn) = http_client_fn {
-        let expanded = quote! {
-            fn main() {
-                ::rigtest::run_main();
-            }
-
+    let http_static = http_client_fn.map(|configure_fn| {
+        quote! {
             #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_HTTP_CLIENT_CONFIGURATOR)]
             #[linkme(crate = ::rigtest::__linkme)]
             static __RIGTEST_HTTP_CLIENT_CONFIGURATOR: ::rigtest::registry::HttpClientConfiguratorEntry =
                 ::rigtest::registry::HttpClientConfiguratorEntry {
                     configure_fn: #configure_fn,
                 };
-        };
-        TokenStream::from(expanded)
-    } else {
-        let expanded = quote! {
-            fn main() {
-                ::rigtest::run_main();
-            }
-        };
-        TokenStream::from(expanded)
-    }
+        }
+    });
+
+    let ssh_static = ssh_client_fn.map(|configure_fn| {
+        quote! {
+            #[cfg(unix)]
+            #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_SSH_CLIENT_CONFIGURATOR)]
+            #[linkme(crate = ::rigtest::__linkme)]
+            static __RIGTEST_SSH_CLIENT_CONFIGURATOR: ::rigtest::registry::SshClientConfiguratorEntry =
+                ::rigtest::registry::SshClientConfiguratorEntry {
+                    configure_fn: #configure_fn,
+                };
+        }
+    });
+
+    let expanded = quote! {
+        fn main() {
+            ::rigtest::run_main();
+        }
+
+        #http_static
+        #ssh_static
+    };
+    TokenStream::from(expanded)
 }
 
 /// Registers an async function as a cargo-rigtest test case.

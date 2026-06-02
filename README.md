@@ -308,6 +308,60 @@ for a working example including custom TLS configuration.
 
 ---
 
+## SSH client
+
+> **Unix only.** The `ssh-client` feature depends on [`openssh`](https://crates.io/crates/openssh),
+> which delegates to the system `ssh` binary via Unix pipes. It does not
+> compile on Windows or other non-Unix targets.
+
+Enable the `ssh-client` feature for cached SSH sessions accessible via
+`ctx.ssh(destination).await?`:
+
+```toml
+[dev-dependencies]
+rigtest = { version = "0.1", features = ["ssh-client"] }
+```
+
+`ctx.ssh("user@host")` returns an `Arc<openssh::Session>` connected to the
+given destination. Sessions are cached by destination string within the test
+subprocess — repeated calls to the same host reuse the existing connection,
+avoiding expensive reconnects over high-latency tunnels.
+
+The `rigtest::ssh!` convenience macro runs a shell command in one line:
+
+```rust
+let output = rigtest::ssh!(ctx, "deploy@staging.example.com", "systemctl status app").output().await?;
+assert!(output.status.success());
+```
+
+An optional destination-aware configurator can be registered to customise
+the connection — for example to accept self-signed host keys in a CI
+environment or to select a non-default identity file:
+
+```rust
+fn configure_ssh(
+    _destination: &str,
+    mut builder: rigtest::openssh::SessionBuilder,
+) -> Result<rigtest::openssh::SessionBuilder, rigtest::Error> {
+    builder.known_hosts_check(rigtest::openssh::KnownHosts::Accept);
+    Ok(builder)
+}
+
+#[rigtest::main(ssh_client = configure_ssh)]
+fn main() {}
+```
+
+The configurator receives the destination string so different hosts can
+receive different configuration. Omitting the configurator uses the
+`openssh` defaults, which inherit your SSH agent and `~/.ssh/config`
+automatically.
+
+See [`examples/ssh-client`](examples/ssh-client) for a complete working
+example. Set `SSH_HOST=user@yourhost` before running, or leave it unset
+to default to `localhost`.
+
+---
+
 ## Running tests
 
 ```

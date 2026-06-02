@@ -13,6 +13,10 @@ pub struct TestContext {
     /// Lazily-initialized HTTP client. Built on first call to [`Self::client`].
     #[cfg(feature = "http-client")]
     client: OnceCell<reqwest::Client>,
+    /// SSH sessions cached by destination string. Unix only.
+    #[cfg(all(feature = "ssh-client", unix))]
+    ssh_sessions:
+        tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<openssh::Session>>>,
 }
 
 impl TestContext {
@@ -31,6 +35,8 @@ impl TestContext {
             global_data: Arc::new(global_data),
             #[cfg(feature = "http-client")]
             client: OnceCell::new(),
+            #[cfg(all(feature = "ssh-client", unix))]
+            ssh_sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -61,6 +67,48 @@ impl TestContext {
                 Ok(builder.build()?)
             })
             .await
+    }
+
+    /// Returns a cached SSH session for `destination`, connecting on first call.
+    ///
+    /// `destination` may be any value accepted by the `ssh` binary — for example
+    /// `"user@host"`, `"host"`, or an alias defined in `~/.ssh/config`. Sessions
+    /// are cached by destination string within this subprocess; a second call with
+    /// the same destination returns the existing session without reconnecting.
+    ///
+    /// To customize the connection (e.g. override known-hosts checking or select
+    /// a non-default identity file), register a configurator via
+    /// `#[rigtest::main(ssh_client = your_fn)]`.
+    ///
+    /// # Platform support
+    ///
+    /// This method is only available on Unix. The underlying [`openssh`] crate
+    /// delegates to the system `ssh` binary, which is a Unix-only dependency.
+    /// The `ssh-client` feature has no effect on non-Unix targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the registered `ssh_client` configurator returns an
+    /// error, or if the underlying SSH connection cannot be established.
+    #[cfg(all(feature = "ssh-client", unix))]
+    pub async fn ssh(
+        &self,
+        destination: &str,
+    ) -> Result<std::sync::Arc<openssh::Session>, crate::Error> {
+        let mut sessions = self.ssh_sessions.lock().await;
+        if let Some(session) = sessions.get(destination) {
+            return Ok(std::sync::Arc::clone(session));
+        }
+        let builder = openssh::SessionBuilder::default();
+        let builder = if let Some(entry) = crate::registry::RIG_SSH_CLIENT_CONFIGURATOR.first() {
+            (entry.configure_fn)(destination, builder)?
+        } else {
+            builder
+        };
+        let session = builder.connect(destination).await?;
+        let arc = std::sync::Arc::new(session);
+        sessions.insert(destination.to_string(), std::sync::Arc::clone(&arc));
+        Ok(arc)
     }
 
     /// Run per-test setup logic and return its result.

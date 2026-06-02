@@ -177,6 +177,12 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         "cargo-rigtest: at most one #[rigtest::main(http_client = …)] may be defined, found {}",
         crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR.len()
     );
+    #[cfg(all(feature = "ssh-client", unix))]
+    assert!(
+        crate::registry::RIG_SSH_CLIENT_CONFIGURATOR.len() <= 1,
+        "cargo-rigtest: at most one #[rigtest::main(ssh_client = …)] may be defined, found {}",
+        crate::registry::RIG_SSH_CLIENT_CONFIGURATOR.len()
+    );
 
     let reporter = Arc::new(Reporter::new());
 
