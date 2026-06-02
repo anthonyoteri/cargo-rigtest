@@ -41,10 +41,7 @@ fn configure_ssh(
 async fn runs_remote_command(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ctx
-        .global_data
-        .downcast_ref::<SharedState>()
-        .expect("global_data should be SharedState");
+    let state = ctx.global::<SharedState>();
 
     let session = ctx.ssh(&state.host).await?;
     let output = session
@@ -63,10 +60,7 @@ async fn runs_remote_command(
 async fn ssh_macro_convenience(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ctx
-        .global_data
-        .downcast_ref::<SharedState>()
-        .expect("global_data should be SharedState");
+    let state = ctx.global::<SharedState>();
 
     let output = rigtest::ssh!(ctx, &state.host, "uname -s").output().await?;
     assert!(output.status.success(), "uname should succeed");
@@ -78,10 +72,7 @@ async fn ssh_macro_convenience(
 async fn reuses_cached_session(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ctx
-        .global_data
-        .downcast_ref::<SharedState>()
-        .expect("global_data should be SharedState");
+    let state = ctx.global::<SharedState>();
 
     let s1 = ctx.ssh(&state.host).await?;
     let s2 = ctx.ssh(&state.host).await?;
