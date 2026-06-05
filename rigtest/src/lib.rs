@@ -252,8 +252,11 @@ pub extern crate linkme as __linkme;
 pub extern crate serde_json as __serde_json;
 
 pub mod context;
+pub(crate) mod orchestrator;
+pub(crate) mod protocol;
 pub mod registry;
 pub mod reporter;
+pub(crate) mod runner;
 pub mod scheduler;
 
 pub use context::TestContext;
