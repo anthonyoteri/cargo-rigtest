@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use rand::seq::SliceRandom as _;
@@ -8,10 +8,11 @@ use rand::SeedableRng as _;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::protocol::{self, SubprocessOutcome};
+use crate::protocol::SubprocessOutcome;
 use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_TEST_CASES};
 use crate::reporter::Reporter;
 use crate::scheduler::RuntimeArgs;
+use crate::subprocess::{OsSubprocessRunner, SpawnRequest, SubprocessRunner};
 
 fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
@@ -28,13 +29,6 @@ fn apply_filter<'a>(
         .collect()
 }
 
-struct RunConfig {
-    exe: std::path::PathBuf,
-    state_var: String,
-    state_json: String,
-    no_capture: bool,
-}
-
 #[derive(Clone, Copy)]
 enum Outcome {
     Passed,
@@ -42,173 +36,28 @@ enum Outcome {
     Failed,
 }
 
-/// Grace period between SIGTERM and SIGKILL when a test times out.
-const KILL_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Send SIGTERM and wait up to `KILL_GRACE_PERIOD` for the process to exit,
-/// then send SIGKILL if it is still running.
-///
-/// On non-Unix platforms SIGTERM is not available, so this falls straight
-/// through to a hard kill.
-async fn graceful_kill(child: &mut tokio::process::Child) {
-    #[cfg(unix)]
-    {
-        if let Some(pid) = child.id() {
-            // SAFETY: kill(2) is safe to call with a valid pid and signal number.
-            unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
-        }
-
-        tokio::select! {
-            _ = child.wait() => return,
-            () = tokio::time::sleep(KILL_GRACE_PERIOD) => {}
-        }
-    }
-
-    let _ = child.kill().await;
-}
-
-enum WaitOutcome {
-    Exited(std::process::ExitStatus),
-    TimedOut(std::time::Duration),
-}
-
-/// Wait for `child` to exit, killing it gracefully if `timeout` elapses.
-async fn wait_or_timeout(
-    child: &mut tokio::process::Child,
-    timeout: Option<std::time::Duration>,
-) -> anyhow::Result<WaitOutcome> {
-    match timeout {
-        Some(dur) => tokio::select! {
-            r = child.wait() => r.map(WaitOutcome::Exited).map_err(|e| anyhow!("{e}")),
-            () = tokio::time::sleep(dur) => {
-                graceful_kill(child).await;
-                Ok(WaitOutcome::TimedOut(dur))
-            }
-        },
-        None => child
-            .wait()
-            .await
-            .map(WaitOutcome::Exited)
-            .map_err(|e| anyhow!("{e}")),
-    }
-}
-
-async fn drain_pipe<R>(handle: Option<R>) -> String
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt as _;
-    let Some(mut h) = handle else {
-        return String::new();
-    };
-    let mut bytes = Vec::new();
-    let _ = h.read_to_end(&mut bytes).await;
-    if bytes.is_empty() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-/// Spawn in no-capture mode: stdout inherited, stderr piped for skip-reason
-/// extraction. Stderr is replayed to the terminal on failure so it is not lost.
-async fn spawn_no_capture(
-    mut cmd: tokio::process::Command,
-    timeout: Option<std::time::Duration>,
-) -> anyhow::Result<SubprocessOutcome> {
-    let mut child = cmd
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
-
-    let status = match wait_or_timeout(&mut child, timeout).await? {
-        WaitOutcome::TimedOut(dur) => return Ok(SubprocessOutcome::TimedOut(dur)),
-        WaitOutcome::Exited(s) => s,
-    };
-
-    let stderr = drain_pipe(child.stderr.take()).await;
-
-    match status.code() {
-        Some(0) => Ok(SubprocessOutcome::Passed),
-        Some(c) if c == protocol::SKIP_EXIT_CODE => Ok(SubprocessOutcome::Skipped(
-            protocol::decode_skip_reason(&stderr),
-        )),
-        code => {
-            // Stderr was not inherited, so replay it so the user can see it.
-            eprint!("{stderr}");
-            Ok(SubprocessOutcome::Failed {
-                reason: protocol::exit_code_reason(code),
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        }
-    }
-}
-
-/// Spawn in capture mode: both stdout and stderr piped, printed only on
-/// failure.
-async fn spawn_captured(
-    mut cmd: tokio::process::Command,
-    timeout: Option<std::time::Duration>,
-) -> anyhow::Result<SubprocessOutcome> {
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
-
-    let status = match wait_or_timeout(&mut child, timeout).await? {
-        WaitOutcome::TimedOut(dur) => return Ok(SubprocessOutcome::TimedOut(dur)),
-        WaitOutcome::Exited(s) => s,
-    };
-
-    let (stdout, stderr) = tokio::join!(
-        drain_pipe(child.stdout.take()),
-        drain_pipe(child.stderr.take())
-    );
-
-    Ok(protocol::decode_outcome(status.code(), stdout, stderr))
-}
-
-/// Run a single test subprocess, respecting timeout and capture settings.
-async fn spawn_test_process(
-    exe: &std::path::Path,
-    test_name: &str,
-    state_var: &str,
-    state_json: &str,
-    no_capture: bool,
-    timeout: Option<std::time::Duration>,
-) -> anyhow::Result<SubprocessOutcome> {
-    let mut cmd = tokio::process::Command::new(exe);
-    cmd.arg("--run-single")
-        .arg(test_name)
-        .arg("--state-env-var")
-        .arg(state_var)
-        .env(state_var, state_json);
-
-    if no_capture {
-        spawn_no_capture(cmd, timeout).await
-    } else {
-        spawn_captured(cmd, timeout).await
-    }
-}
-
 /// Run a test with retries, returning the final outcome and updating the
 /// reporter.
-async fn run_test(
+async fn run_test<R: SubprocessRunner>(
+    runner: &R,
     reporter: &Reporter,
-    exe: &std::path::Path,
     tc: &crate::registry::TestCase,
     state_var: &str,
     state_json: &str,
-    no_capture: bool,
-) -> (Outcome, std::time::Duration) {
+) -> (Outcome, Duration) {
     let pb = reporter.test_started(tc.name);
     let test_start = Instant::now();
     let max_attempts = tc.retries + 1;
 
     for attempt in 1..=max_attempts {
-        let outcome =
-            spawn_test_process(exe, tc.name, state_var, state_json, no_capture, tc.timeout).await;
+        let outcome = runner
+            .run(SpawnRequest {
+                test_name: tc.name,
+                state_var,
+                state_json,
+                timeout: tc.timeout,
+            })
+            .await;
 
         let is_last = attempt == max_attempts;
         let duration = test_start.elapsed();
@@ -254,9 +103,11 @@ async fn run_test(
     unreachable!()
 }
 
-async fn dispatch_cases(
+async fn dispatch_cases<R: SubprocessRunner>(
+    runner: Arc<R>,
     reporter: &Arc<Reporter>,
-    cfg: &RunConfig,
+    state_var: String,
+    state_json: String,
     semaphore: Arc<Semaphore>,
     parallel_cases: Vec<&'static crate::registry::TestCase>,
     serial_cases: Vec<&'static crate::registry::TestCase>,
@@ -266,20 +117,18 @@ async fn dispatch_cases(
     let mut join_set: JoinSet<Outcome> = JoinSet::new();
 
     for tc in parallel_cases {
+        let runner = Arc::clone(&runner);
         let reporter = Arc::clone(reporter);
         let semaphore = Arc::clone(&semaphore);
-        let exe = cfg.exe.clone();
-        let state_var = cfg.state_var.clone();
-        let state_json = cfg.state_json.clone();
-        let no_capture = cfg.no_capture;
+        let state_var = state_var.clone();
+        let state_json = state_json.clone();
 
         join_set.spawn(async move {
             let _permit = semaphore
                 .acquire()
                 .await
                 .expect("semaphore should not be closed");
-            let (outcome, _) =
-                run_test(&reporter, &exe, tc, &state_var, &state_json, no_capture).await;
+            let (outcome, _) = run_test(&*runner, &reporter, tc, &state_var, &state_json).await;
             outcome
         });
     }
@@ -294,15 +143,7 @@ async fn dispatch_cases(
     }
 
     for tc in serial_cases {
-        let (outcome, _) = run_test(
-            reporter,
-            &cfg.exe,
-            tc,
-            &cfg.state_var,
-            &cfg.state_json,
-            cfg.no_capture,
-        )
-        .await;
+        let (outcome, _) = run_test(&*runner, reporter, tc, &state_var, &state_json).await;
         match outcome {
             Outcome::Passed => passed += 1,
             Outcome::Skipped => skipped += 1,
@@ -388,20 +229,23 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     let exe =
         std::env::current_exe().map_err(|e| anyhow!("failed to find current executable: {e}"))?;
 
-    let cfg = RunConfig {
-        exe,
-        state_var,
-        state_json,
-        no_capture: args.no_capture,
-    };
+    let runner = Arc::new(OsSubprocessRunner::new(exe, args.no_capture));
 
     let suite_start = Instant::now();
 
     let (serial_cases, parallel_cases): (Vec<_>, Vec<_>) =
         cases.into_iter().partition(|tc| tc.serial);
 
-    let (passed, skipped) =
-        dispatch_cases(&reporter, &cfg, semaphore, parallel_cases, serial_cases).await;
+    let (passed, skipped) = dispatch_cases(
+        runner,
+        &reporter,
+        state_var,
+        state_json,
+        semaphore,
+        parallel_cases,
+        serial_cases,
+    )
+    .await;
 
     let elapsed = suite_start.elapsed();
     reporter.finish(passed, skipped, total, elapsed);
@@ -424,7 +268,7 @@ mod tests {
     use super::*;
     use crate::context::TestContext;
     use crate::registry::{BoxFuture, TestCase};
-    use std::sync::Arc;
+    use std::sync::Mutex;
 
     fn make_case(name: &'static str) -> TestCase {
         TestCase {
@@ -466,5 +310,92 @@ mod tests {
         let cases = [make_case("foo"), make_case("bar")];
         let refs: Vec<&TestCase> = cases.iter().collect();
         assert_eq!(apply_filter(&refs, Some("xyz")).len(), 0);
+    }
+
+    // ── Subprocess seam demo tests ───────────────────────────────────────
+    //
+    // These prove the SubprocessRunner trait is a real seam: the
+    // orchestration logic (retry loop) is now driveable end-to-end with a
+    // fake runner — no OS processes spawned.
+
+    /// Test double that returns a pre-programmed queue of outcomes and records
+    /// every call. Multiple queued outcomes per test exercise the retry path.
+    struct FakeRunner {
+        queue: Mutex<Vec<SubprocessOutcome>>,
+        calls: Mutex<u32>,
+    }
+
+    impl FakeRunner {
+        fn new(outcomes: Vec<SubprocessOutcome>) -> Self {
+            Self {
+                queue: Mutex::new(outcomes),
+                calls: Mutex::new(0),
+            }
+        }
+
+        fn call_count(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    impl SubprocessRunner for FakeRunner {
+        async fn run(&self, _req: SpawnRequest<'_>) -> anyhow::Result<SubprocessOutcome> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(self.queue.lock().unwrap().remove(0))
+        }
+    }
+
+    fn case_with_retries(name: &'static str, retries: u32) -> TestCase {
+        let mut tc = make_case(name);
+        tc.retries = retries;
+        tc
+    }
+
+    #[tokio::test]
+    async fn retry_loop_succeeds_after_one_failure() {
+        let runner = FakeRunner::new(vec![
+            SubprocessOutcome::Failed {
+                reason: "transient".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            SubprocessOutcome::Passed,
+        ]);
+        let tc = case_with_retries("flaky", 1);
+        let reporter = Reporter::new();
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+
+        assert!(matches!(outcome, Outcome::Passed));
+        assert_eq!(runner.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn skip_does_not_retry() {
+        let runner = FakeRunner::new(vec![SubprocessOutcome::Skipped("nope".into())]);
+        let tc = case_with_retries("skipper", 3);
+        let reporter = Reporter::new();
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+
+        assert!(matches!(outcome, Outcome::Skipped));
+        assert_eq!(runner.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_exhausts_and_reports_failure() {
+        let mk_fail = || SubprocessOutcome::Failed {
+            reason: "boom".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let runner = FakeRunner::new(vec![mk_fail(), mk_fail(), mk_fail()]);
+        let tc = case_with_retries("always_fails", 2);
+        let reporter = Reporter::new();
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+
+        assert!(matches!(outcome, Outcome::Failed));
+        assert_eq!(runner.call_count(), 3); // initial + 2 retries
     }
 }
