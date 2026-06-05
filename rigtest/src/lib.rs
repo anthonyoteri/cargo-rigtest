@@ -258,6 +258,7 @@ pub mod registry;
 pub mod reporter;
 pub(crate) mod runner;
 pub mod scheduler;
+pub(crate) mod subprocess;
 
 pub use context::TestContext;
 #[cfg(all(feature = "ssh-client", unix))]
