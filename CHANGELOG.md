@@ -5,6 +5,14 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.3.1](https://github.com/anthonyoteri/cargo-rigtest/compare/87e00b1feefe8f044db8de93b1a52ffe3fde7c70..v0.3.1) - 2026-06-05
+#### Refactoring
+- (**orchestrator**) add TestEventReporter trait and dispatch-level tests - ([0808363](https://github.com/anthonyoteri/cargo-rigtest/commit/08083633dffbe7923cabcd816dd31758810a107e)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**orchestrator**) introduce SubprocessRunner trait for test execution - ([ca4fb70](https://github.com/anthonyoteri/cargo-rigtest/commit/ca4fb70b8c7cf2b9c47c94147640e021ca36299d)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**scheduler**) split coordinator/subprocess paths and extract protocol module - ([87e00b1](https://github.com/anthonyoteri/cargo-rigtest/commit/87e00b1feefe8f044db8de93b1a52ffe3fde7c70)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.3.0](https://github.com/anthonyoteri/cargo-rigtest/compare/e0e89f8befced8b1d8c2f30c70d944269c83e19d..v0.3.0) - 2026-06-02
 #### Features
 - (**context**) add ctx.global::<T>() typed helper for global state - ([1d8cbc2](https://github.com/anthonyoteri/cargo-rigtest/commit/1d8cbc2d982ad82d18774aa5b51ac22336ea91f4)) - [@anthonyoteri](https://github.com/anthonyoteri)
