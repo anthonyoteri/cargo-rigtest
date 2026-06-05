@@ -11,6 +11,7 @@ pub(crate) const SKIP_EXIT_CODE: i32 = 2;
 const SKIP_PREFIX: &str = "cargo-rigtest-skip: ";
 
 /// The decoded result of running one test subprocess.
+#[derive(Clone)]
 pub(crate) enum SubprocessOutcome {
     Passed,
     Skipped(String),
