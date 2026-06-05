@@ -254,10 +254,11 @@ pub extern crate serde_json as __serde_json;
 pub mod context;
 pub(crate) mod orchestrator;
 pub(crate) mod protocol;
+#[doc(hidden)]
 pub mod registry;
-pub mod reporter;
+pub(crate) mod reporter;
 pub(crate) mod runner;
-pub mod scheduler;
+pub(crate) mod scheduler;
 pub(crate) mod subprocess;
 
 pub use context::TestContext;
@@ -266,7 +267,6 @@ pub use openssh;
 #[cfg(feature = "http-client")]
 pub use reqwest;
 pub use rigtest_macros::{global_setup, global_teardown, main, testcase};
-pub use scheduler::RuntimeArgs;
 
 /// Convenient glob import for test files.
 ///
@@ -435,7 +435,7 @@ pub fn run_main() -> ! {
         .expect("failed to build tokio runtime");
 
     let result = runtime.block_on(async {
-        let args = <RuntimeArgs as clap::Parser>::parse();
+        let args = <scheduler::RuntimeArgs as clap::Parser>::parse();
         if args.rig_probe {
             flush_and_exit(0);
         }

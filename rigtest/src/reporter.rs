@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use console::style;
@@ -18,12 +20,34 @@ fn indent(s: &str) -> String {
         })
 }
 
+/// Receives lifecycle events as the orchestrator runs a test suite.
+///
+/// Implementations include the live TTY [`Reporter`], a [`NullReporter`] that
+/// silently discards events, and a [`RecordingReporter`] that captures the
+/// event sequence for assertions in tests.
+///
+/// `Send + Sync + 'static` so a single reporter can be shared via `Arc`
+/// across `JoinSet`-spawned tasks for parallel dispatch.
+pub(crate) trait TestEventReporter: Send + Sync + 'static {
+    fn test_started(&self, name: &str);
+    fn test_passed(&self, name: &str, duration: Duration);
+    fn test_skipped(&self, name: &str, duration: Duration, reason: &str);
+    fn test_failed(&self, name: &str, duration: Duration, reason: &str, stdout: &str, stderr: &str);
+    fn test_retrying(&self, name: &str, attempt: u32, max_attempts: u32, reason: &str);
+    fn print_phase(&self, label: &str);
+    fn finish(&self, passed: usize, skipped: usize, total: usize, elapsed: Duration);
+}
+
 /// Nextest-style reporter. In a TTY it shows live spinners per running test;
 /// in a non-TTY environment (CI, piped output) it falls back to plain lines
 /// so output is never silently dropped.
-pub struct Reporter {
+pub(crate) struct Reporter {
     multi: MultiProgress,
     is_tty: bool,
+    /// Active spinners keyed by test name. The orchestrator drives lifecycle
+    /// events by name; `Reporter` owns the per-test `ProgressBar` so callers
+    /// never have to thread a handle through.
+    spinners: Mutex<HashMap<String, ProgressBar>>,
 }
 
 impl Default for Reporter {
@@ -40,8 +64,7 @@ impl Reporter {
     /// used; in non-TTY environments (CI, piped output) the reporter falls back
     /// to plain lines printed directly to stderr so no output is silently
     /// dropped.
-    #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let is_tty = console::Term::stderr().is_term();
         let target = if is_tty {
             ProgressDrawTarget::stderr()
@@ -51,160 +74,28 @@ impl Reporter {
         Self {
             multi: MultiProgress::with_draw_target(target),
             is_tty,
+            spinners: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Begin tracking a running test named `name`.
-    ///
-    /// In TTY mode this adds an animated spinner to the [`MultiProgress`]
-    /// display. In non-TTY mode it returns a hidden, no-op [`ProgressBar`].
-    /// Either way the returned handle must be passed to [`test_passed`],
-    /// [`test_skipped`], or [`test_failed`] to finalise the line.
-    ///
-    /// [`test_passed`]: Reporter::test_passed
-    /// [`test_skipped`]: Reporter::test_skipped
-    /// [`test_failed`]: Reporter::test_failed
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal spinner template string is malformed (it is a
-    /// compile-time constant, so this cannot happen in practice).
-    #[must_use]
-    pub fn test_started(&self, name: &str) -> ProgressBar {
-        if self.is_tty {
-            let pb = self.multi.add(ProgressBar::new_spinner());
-            pb.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                    .expect("valid spinner template"),
-            );
-            pb.set_message(format!("{} {}", style("RUNNING").cyan().bold(), name));
-            pb.enable_steady_tick(Duration::from_millis(80));
-            pb
-        } else {
-            ProgressBar::hidden()
-        }
+    fn take_spinner(&self, name: &str) -> Option<ProgressBar> {
+        self.spinners.lock().expect("spinners mutex").remove(name)
     }
 
-    /// Finalise the progress line for `name` as `PASS`.
-    ///
-    /// `pb` is the spinner handle returned by [`test_started`]. It is cleared
-    /// after the final line is printed. `duration` is the wall-clock time the
-    /// test took from start to finish.
-    ///
-    /// [`test_started`]: Reporter::test_started
-    pub fn test_passed(&self, pb: &ProgressBar, name: &str, duration: Duration) {
-        let line = format!(
-            "{} [{:.3}s] {}",
-            style("PASS").green().bold(),
-            duration.as_secs_f64(),
-            name,
-        );
+    fn finalize_spinner(&self, name: &str, line: &str) {
         if self.is_tty {
-            // println flushes synchronously through the draw thread; finish_and_clear
-            // then removes the spinner. Using finish_with_message instead would hand
-            // the line to the async draw thread and race with MultiProgress drop.
-            self.multi.println(&line).ok();
-            pb.finish_and_clear();
+            // println flushes synchronously through the draw thread;
+            // finish_and_clear then removes the spinner. Reversing this
+            // order would let the spinner be torn down before the line is
+            // drawn and race with MultiProgress's draw thread.
+            self.multi.println(line).ok();
+            if let Some(pb) = self.take_spinner(name) {
+                pb.finish_and_clear();
+            }
         } else {
-            eprintln!("{line}");
-        }
-    }
-
-    /// Print a `RETRY` notification while the test is still in progress.
-    ///
-    /// `name` is the test name. `attempt` is the attempt number (1-based) that
-    /// just failed. `max_attempts` is the total number of attempts allowed
-    /// (initial attempt + retries). `reason` is the failure message for the
-    /// attempt being retried. The spinner for the test is not finalised and
-    /// continues to animate.
-    pub fn test_retrying(&self, name: &str, attempt: u32, max_attempts: u32, reason: &str) {
-        let line = format!(
-            "{} [{}/{}] {}: {}",
-            style("RETRY").yellow().bold(),
-            attempt,
-            max_attempts,
-            name,
-            reason,
-        );
-        if self.is_tty {
-            self.multi.println(&line).ok();
-        } else {
-            eprintln!("{line}");
-        }
-    }
-
-    /// Finalise the progress line for `name` as `SKIP`.
-    ///
-    /// `pb` is the spinner handle returned by [`test_started`]. `duration` is
-    /// the wall-clock time elapsed before the test signalled a skip. `reason`
-    /// is the human-readable skip message; it is appended to the output line
-    /// after a colon and is omitted when empty.
-    ///
-    /// [`test_started`]: Reporter::test_started
-    pub fn test_skipped(&self, pb: &ProgressBar, name: &str, duration: Duration, reason: &str) {
-        let mut line = format!(
-            "{} [{:.3}s] {}",
-            style("SKIP").yellow().bold(),
-            duration.as_secs_f64(),
-            name,
-        );
-        if !reason.is_empty() {
-            use std::fmt::Write as _;
-            let _ = write!(line, ": {reason}");
-        }
-        if self.is_tty {
-            self.multi.println(&line).ok();
-            pb.finish_and_clear();
-        } else {
-            eprintln!("{line}");
-        }
-    }
-
-    /// Finalise the progress line for `name` as `FAIL` and print any captured output.
-    ///
-    /// `pb` is the spinner handle returned by [`test_started`]. `duration` is
-    /// the elapsed wall-clock time. `reason` is a short description of the
-    /// failure (e.g. `"exited with code 1"` or `"timed out after 5.0s"`).
-    /// `stdout` and `stderr` are the captured output from the test subprocess;
-    /// non-empty sections are printed indented below the failure line.
-    ///
-    /// [`test_started`]: Reporter::test_started
-    pub fn test_failed(
-        &self,
-        pb: &ProgressBar,
-        name: &str,
-        duration: Duration,
-        reason: &str,
-        stdout: &str,
-        stderr: &str,
-    ) {
-        let header = format!(
-            "{} [{:.3}s] {}: {}",
-            style("FAIL").red().bold(),
-            duration.as_secs_f64(),
-            name,
-            reason,
-        );
-        if self.is_tty {
-            self.multi.println(&header).ok();
-            pb.finish_and_clear();
-        } else {
-            eprintln!("{header}");
-        }
-        self.print_captured("stdout", stdout);
-        self.print_captured("stderr", stderr);
-    }
-
-    /// Print a dimmed phase header to mark a global-lifecycle boundary.
-    ///
-    /// `label` is the phase name (e.g. `"global setup"`, `"global teardown"`).
-    /// Output produced by the phase appears on the lines that follow this
-    /// header, interleaved naturally with the terminal or log stream.
-    pub fn print_phase(&self, label: &str) {
-        let line = format!("{} {}", style("──").dim(), style(label).dim().bold());
-        if self.is_tty {
-            self.multi.println(&line).ok();
-        } else {
+            // Drop the spinner anyway to free the slot in the map. In
+            // non-TTY mode `pb` is hidden so finish_and_clear is a no-op.
+            let _ = self.take_spinner(name);
             eprintln!("{line}");
         }
     }
@@ -222,14 +113,95 @@ impl Reporter {
             eprintln!("{output}");
         }
     }
+}
 
-    /// Print the final test-run summary line.
-    ///
-    /// `passed` and `skipped` are the counts of tests with those outcomes.
-    /// `total` is the total number of tests that were run; `failed` is derived
-    /// as `total - passed - skipped`. `elapsed` is the wall-clock duration of
-    /// the entire suite from start to finish.
-    pub fn finish(&self, passed: usize, skipped: usize, total: usize, elapsed: Duration) {
+impl TestEventReporter for Reporter {
+    fn test_started(&self, name: &str) {
+        if !self.is_tty {
+            return;
+        }
+        let pb = self.multi.add(ProgressBar::new_spinner());
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}").expect("valid spinner template"),
+        );
+        pb.set_message(format!("{} {}", style("RUNNING").cyan().bold(), name));
+        pb.enable_steady_tick(Duration::from_millis(80));
+        self.spinners
+            .lock()
+            .expect("spinners mutex")
+            .insert(name.to_string(), pb);
+    }
+
+    fn test_passed(&self, name: &str, duration: Duration) {
+        let line = format!(
+            "{} [{:.3}s] {}",
+            style("PASS").green().bold(),
+            duration.as_secs_f64(),
+            name,
+        );
+        self.finalize_spinner(name, &line);
+    }
+
+    fn test_skipped(&self, name: &str, duration: Duration, reason: &str) {
+        let mut line = format!(
+            "{} [{:.3}s] {}",
+            style("SKIP").yellow().bold(),
+            duration.as_secs_f64(),
+            name,
+        );
+        if !reason.is_empty() {
+            use std::fmt::Write as _;
+            let _ = write!(line, ": {reason}");
+        }
+        self.finalize_spinner(name, &line);
+    }
+
+    fn test_failed(
+        &self,
+        name: &str,
+        duration: Duration,
+        reason: &str,
+        stdout: &str,
+        stderr: &str,
+    ) {
+        let header = format!(
+            "{} [{:.3}s] {}: {}",
+            style("FAIL").red().bold(),
+            duration.as_secs_f64(),
+            name,
+            reason,
+        );
+        self.finalize_spinner(name, &header);
+        self.print_captured("stdout", stdout);
+        self.print_captured("stderr", stderr);
+    }
+
+    fn test_retrying(&self, name: &str, attempt: u32, max_attempts: u32, reason: &str) {
+        let line = format!(
+            "{} [{}/{}] {}: {}",
+            style("RETRY").yellow().bold(),
+            attempt,
+            max_attempts,
+            name,
+            reason,
+        );
+        if self.is_tty {
+            self.multi.println(&line).ok();
+        } else {
+            eprintln!("{line}");
+        }
+    }
+
+    fn print_phase(&self, label: &str) {
+        let line = format!("{} {}", style("──").dim(), style(label).dim().bold());
+        if self.is_tty {
+            self.multi.println(&line).ok();
+        } else {
+            eprintln!("{line}");
+        }
+    }
+
+    fn finish(&self, passed: usize, skipped: usize, total: usize, elapsed: Duration) {
         let failed = total - passed - skipped;
         let separator = style("─".repeat(60)).dim().to_string();
 
@@ -264,5 +236,120 @@ impl Reporter {
             eprintln!("{separator}");
             eprintln!("{summary}");
         }
+    }
+}
+
+// ── Test doubles ─────────────────────────────────────────────────────────
+
+/// A reporter that discards every event. Useful in tests that exercise the
+/// orchestrator's behaviour without needing to observe reporter output.
+#[cfg(test)]
+pub(crate) struct NullReporter;
+
+#[cfg(test)]
+impl TestEventReporter for NullReporter {
+    fn test_started(&self, _name: &str) {}
+    fn test_passed(&self, _name: &str, _duration: Duration) {}
+    fn test_skipped(&self, _name: &str, _duration: Duration, _reason: &str) {}
+    fn test_failed(
+        &self,
+        _name: &str,
+        _duration: Duration,
+        _reason: &str,
+        _stdout: &str,
+        _stderr: &str,
+    ) {
+    }
+    fn test_retrying(&self, _name: &str, _attempt: u32, _max_attempts: u32, _reason: &str) {}
+    fn print_phase(&self, _label: &str) {}
+    fn finish(&self, _passed: usize, _skipped: usize, _total: usize, _elapsed: Duration) {}
+}
+
+/// Captures the sequence of events for assertions in tests.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Event {
+    Started(String),
+    Passed(String),
+    Skipped(String, String),
+    Failed(String, String),
+    Retrying(String, u32, u32, String),
+    Phase(String),
+    Finished(usize, usize, usize),
+}
+
+#[cfg(test)]
+pub(crate) struct RecordingReporter {
+    events: Mutex<Vec<Event>>,
+}
+
+#[cfg(test)]
+impl RecordingReporter {
+    pub(crate) fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn events(&self) -> Vec<Event> {
+        self.events.lock().expect("events mutex").clone()
+    }
+}
+
+#[cfg(test)]
+impl TestEventReporter for RecordingReporter {
+    fn test_started(&self, name: &str) {
+        self.events
+            .lock()
+            .expect("events mutex")
+            .push(Event::Started(name.to_string()));
+    }
+    fn test_passed(&self, name: &str, _duration: Duration) {
+        self.events
+            .lock()
+            .expect("events mutex")
+            .push(Event::Passed(name.to_string()));
+    }
+    fn test_skipped(&self, name: &str, _duration: Duration, reason: &str) {
+        self.events
+            .lock()
+            .expect("events mutex")
+            .push(Event::Skipped(name.to_string(), reason.to_string()));
+    }
+    fn test_failed(
+        &self,
+        name: &str,
+        _duration: Duration,
+        reason: &str,
+        _stdout: &str,
+        _stderr: &str,
+    ) {
+        self.events
+            .lock()
+            .expect("events mutex")
+            .push(Event::Failed(name.to_string(), reason.to_string()));
+    }
+    fn test_retrying(&self, name: &str, attempt: u32, max_attempts: u32, reason: &str) {
+        self.events
+            .lock()
+            .expect("events mutex")
+            .push(Event::Retrying(
+                name.to_string(),
+                attempt,
+                max_attempts,
+                reason.to_string(),
+            ));
+    }
+    fn print_phase(&self, label: &str) {
+        self.events
+            .lock()
+            .expect("events mutex")
+            .push(Event::Phase(label.to_string()));
+    }
+    fn finish(&self, passed: usize, skipped: usize, total: usize, _elapsed: Duration) {
+        self.events
+            .lock()
+            .expect("events mutex")
+            .push(Event::Finished(passed, skipped, total));
     }
 }

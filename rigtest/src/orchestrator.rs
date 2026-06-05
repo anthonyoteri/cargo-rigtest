@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 
 use crate::protocol::SubprocessOutcome;
 use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_TEST_CASES};
-use crate::reporter::Reporter;
+use crate::reporter::{Reporter, TestEventReporter};
 use crate::scheduler::RuntimeArgs;
 use crate::subprocess::{OsSubprocessRunner, SpawnRequest, SubprocessRunner};
 
@@ -38,14 +38,14 @@ enum Outcome {
 
 /// Run a test with retries, returning the final outcome and updating the
 /// reporter.
-async fn run_test<R: SubprocessRunner>(
+async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     runner: &R,
-    reporter: &Reporter,
+    reporter: &P,
     tc: &crate::registry::TestCase,
     state_var: &str,
     state_json: &str,
 ) -> (Outcome, Duration) {
-    let pb = reporter.test_started(tc.name);
+    reporter.test_started(tc.name);
     let test_start = Instant::now();
     let max_attempts = tc.retries + 1;
 
@@ -64,11 +64,11 @@ async fn run_test<R: SubprocessRunner>(
 
         match outcome {
             Ok(SubprocessOutcome::Passed) => {
-                reporter.test_passed(&pb, tc.name, duration);
+                reporter.test_passed(tc.name, duration);
                 return (Outcome::Passed, duration);
             }
             Ok(SubprocessOutcome::Skipped(reason)) => {
-                reporter.test_skipped(&pb, tc.name, duration, &reason);
+                reporter.test_skipped(tc.name, duration, &reason);
                 return (Outcome::Skipped, duration);
             }
             Ok(SubprocessOutcome::Failed {
@@ -77,7 +77,7 @@ async fn run_test<R: SubprocessRunner>(
                 stderr,
             }) => {
                 if is_last {
-                    reporter.test_failed(&pb, tc.name, duration, &reason, &stdout, &stderr);
+                    reporter.test_failed(tc.name, duration, &reason, &stdout, &stderr);
                     return (Outcome::Failed, duration);
                 }
                 reporter.test_retrying(tc.name, attempt, max_attempts, &reason);
@@ -85,14 +85,14 @@ async fn run_test<R: SubprocessRunner>(
             Ok(SubprocessOutcome::TimedOut(dur)) => {
                 let reason = format!("timed out after {:.1}s", dur.as_secs_f64());
                 if is_last {
-                    reporter.test_failed(&pb, tc.name, duration, &reason, "", "");
+                    reporter.test_failed(tc.name, duration, &reason, "", "");
                     return (Outcome::Failed, duration);
                 }
                 reporter.test_retrying(tc.name, attempt, max_attempts, &reason);
             }
             Err(e) => {
                 if is_last {
-                    reporter.test_failed(&pb, tc.name, duration, &e.to_string(), "", "");
+                    reporter.test_failed(tc.name, duration, &e.to_string(), "", "");
                     return (Outcome::Failed, duration);
                 }
                 reporter.test_retrying(tc.name, attempt, max_attempts, &e.to_string());
@@ -103,9 +103,9 @@ async fn run_test<R: SubprocessRunner>(
     unreachable!()
 }
 
-async fn dispatch_cases<R: SubprocessRunner>(
+async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
     runner: Arc<R>,
-    reporter: &Arc<Reporter>,
+    reporter: Arc<P>,
     state_var: String,
     state_json: String,
     semaphore: Arc<Semaphore>,
@@ -118,7 +118,7 @@ async fn dispatch_cases<R: SubprocessRunner>(
 
     for tc in parallel_cases {
         let runner = Arc::clone(&runner);
-        let reporter = Arc::clone(reporter);
+        let reporter = Arc::clone(&reporter);
         let semaphore = Arc::clone(&semaphore);
         let state_var = state_var.clone();
         let state_json = state_json.clone();
@@ -128,7 +128,7 @@ async fn dispatch_cases<R: SubprocessRunner>(
                 .acquire()
                 .await
                 .expect("semaphore should not be closed");
-            let (outcome, _) = run_test(&*runner, &reporter, tc, &state_var, &state_json).await;
+            let (outcome, _) = run_test(&*runner, &*reporter, tc, &state_var, &state_json).await;
             outcome
         });
     }
@@ -143,7 +143,7 @@ async fn dispatch_cases<R: SubprocessRunner>(
     }
 
     for tc in serial_cases {
-        let (outcome, _) = run_test(&*runner, reporter, tc, &state_var, &state_json).await;
+        let (outcome, _) = run_test(&*runner, &*reporter, tc, &state_var, &state_json).await;
         match outcome {
             Outcome::Passed => passed += 1,
             Outcome::Skipped => skipped += 1,
@@ -238,7 +238,7 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
 
     let (passed, skipped) = dispatch_cases(
         runner,
-        &reporter,
+        Arc::clone(&reporter),
         state_var,
         state_json,
         semaphore,
@@ -268,6 +268,7 @@ mod tests {
     use super::*;
     use crate::context::TestContext;
     use crate::registry::{BoxFuture, TestCase};
+    use crate::reporter::{Event, NullReporter, RecordingReporter};
     use std::sync::Mutex;
 
     fn make_case(name: &'static str) -> TestCase {
@@ -362,7 +363,7 @@ mod tests {
             SubprocessOutcome::Passed,
         ]);
         let tc = case_with_retries("flaky", 1);
-        let reporter = Reporter::new();
+        let reporter = NullReporter;
 
         let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
 
@@ -374,7 +375,7 @@ mod tests {
     async fn skip_does_not_retry() {
         let runner = FakeRunner::new(vec![SubprocessOutcome::Skipped("nope".into())]);
         let tc = case_with_retries("skipper", 3);
-        let reporter = Reporter::new();
+        let reporter = NullReporter;
 
         let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
 
@@ -391,11 +392,218 @@ mod tests {
         };
         let runner = FakeRunner::new(vec![mk_fail(), mk_fail(), mk_fail()]);
         let tc = case_with_retries("always_fails", 2);
-        let reporter = Reporter::new();
+        let reporter = NullReporter;
 
         let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 3); // initial + 2 retries
+    }
+
+    // ── Reporter seam: assert on the event sequence ──────────────────────
+
+    #[tokio::test]
+    async fn retry_emits_retrying_event_before_passed() {
+        let runner = FakeRunner::new(vec![
+            SubprocessOutcome::Failed {
+                reason: "first failure".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            SubprocessOutcome::Passed,
+        ]);
+        let tc = case_with_retries("flaky", 1);
+        let reporter = RecordingReporter::new();
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+
+        assert!(matches!(outcome, Outcome::Passed));
+        let events = reporter.events();
+        assert!(matches!(events[0], Event::Started(ref n) if n == "flaky"));
+        assert!(
+            matches!(events[1], Event::Retrying(ref n, 1, 2, _) if n == "flaky"),
+            "expected Retrying(flaky, 1/2) at index 1, got {:?}",
+            events[1]
+        );
+        assert!(matches!(events[2], Event::Passed(ref n) if n == "flaky"));
+        assert_eq!(events.len(), 3);
+    }
+
+    // ── Dispatch tests: serial/parallel ordering, semaphore cap, counts ──
+
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn leaked_case(name: &'static str, serial: bool) -> &'static TestCase {
+        let mut tc = make_case(name);
+        tc.serial = serial;
+        Box::leak(Box::new(tc))
+    }
+
+    /// Returns a pre-programmed outcome per test name; otherwise Passed.
+    struct ByNameRunner {
+        outcomes: HashMap<&'static str, SubprocessOutcome>,
+    }
+
+    impl SubprocessRunner for ByNameRunner {
+        async fn run(&self, req: SpawnRequest<'_>) -> anyhow::Result<SubprocessOutcome> {
+            Ok(self
+                .outcomes
+                .get(req.test_name)
+                .cloned()
+                .unwrap_or(SubprocessOutcome::Passed))
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_counts_pass_skip_fail_correctly() {
+        let mut outcomes = HashMap::new();
+        outcomes.insert("a", SubprocessOutcome::Passed);
+        outcomes.insert("b", SubprocessOutcome::Skipped("nope".into()));
+        outcomes.insert(
+            "c",
+            SubprocessOutcome::Failed {
+                reason: "boom".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        outcomes.insert("d", SubprocessOutcome::Passed);
+        outcomes.insert("e", SubprocessOutcome::Passed);
+        let runner = Arc::new(ByNameRunner { outcomes });
+        let reporter = Arc::new(NullReporter);
+        let semaphore = Arc::new(Semaphore::new(4));
+
+        let cases: Vec<&'static TestCase> = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(|n| leaked_case(n, false))
+            .collect();
+
+        let (passed, skipped) = dispatch_cases(
+            runner,
+            reporter,
+            "X".into(),
+            "{}".into(),
+            semaphore,
+            cases,
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(passed, 3);
+        assert_eq!(skipped, 1);
+        // failed = total - passed - skipped = 5 - 3 - 1 = 1
+    }
+
+    #[tokio::test]
+    async fn dispatch_runs_serial_cases_after_all_parallel() {
+        let runner = Arc::new(ByNameRunner {
+            outcomes: HashMap::new(),
+        });
+        let reporter = Arc::new(RecordingReporter::new());
+        let semaphore = Arc::new(Semaphore::new(2));
+
+        let parallel = vec![
+            leaked_case("p1", false),
+            leaked_case("p2", false),
+            leaked_case("p3", false),
+        ];
+        let serial = vec![leaked_case("s1", true), leaked_case("s2", true)];
+
+        let _ = dispatch_cases(
+            Arc::clone(&runner),
+            Arc::clone(&reporter),
+            "X".into(),
+            "{}".into(),
+            semaphore,
+            parallel,
+            serial,
+        )
+        .await;
+
+        let events = reporter.events();
+        let started: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Started(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Every "p*" must come before every "s*".
+        let last_parallel_idx = started
+            .iter()
+            .rposition(|n| n.starts_with('p'))
+            .expect("at least one parallel started");
+        let first_serial_idx = started
+            .iter()
+            .position(|n| n.starts_with('s'))
+            .expect("at least one serial started");
+        assert!(
+            last_parallel_idx < first_serial_idx,
+            "expected all parallel cases to start before any serial case, got started order: {started:?}"
+        );
+    }
+
+    /// Runner that records the maximum number of concurrent in-flight calls
+    /// observed at any point.
+    struct ConcurrencyRunner {
+        active: AtomicUsize,
+        max_observed: AtomicUsize,
+    }
+
+    impl ConcurrencyRunner {
+        fn new() -> Self {
+            Self {
+                active: AtomicUsize::new(0),
+                max_observed: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SubprocessRunner for ConcurrencyRunner {
+        async fn run(&self, _req: SpawnRequest<'_>) -> anyhow::Result<SubprocessOutcome> {
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_observed.fetch_max(now, Ordering::SeqCst);
+            // Yield so other tasks can interleave and bump `active` if they
+            // are allowed to.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(SubprocessOutcome::Passed)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dispatch_respects_semaphore_cap() {
+        let runner = Arc::new(ConcurrencyRunner::new());
+        let reporter = Arc::new(NullReporter);
+        let semaphore = Arc::new(Semaphore::new(2));
+
+        let cases: Vec<&'static TestCase> = (0..10)
+            .map(|i| {
+                let name: &'static str = Box::leak(format!("t{i}").into_boxed_str());
+                leaked_case(name, false)
+            })
+            .collect();
+
+        let _ = dispatch_cases(
+            Arc::clone(&runner),
+            reporter,
+            "X".into(),
+            "{}".into(),
+            semaphore,
+            cases,
+            Vec::new(),
+        )
+        .await;
+
+        let max = runner.max_observed.load(Ordering::SeqCst);
+        assert!(
+            max <= 2,
+            "semaphore cap of 2 violated: max concurrent was {max}"
+        );
+        assert!(
+            max >= 1,
+            "expected some concurrency to be observed, got {max}"
+        );
     }
 }
