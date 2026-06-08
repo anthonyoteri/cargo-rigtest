@@ -252,6 +252,7 @@ pub extern crate linkme as __linkme;
 pub extern crate serde_json as __serde_json;
 
 pub mod context;
+pub(crate) mod junit;
 pub(crate) mod orchestrator;
 pub(crate) mod protocol;
 #[doc(hidden)]

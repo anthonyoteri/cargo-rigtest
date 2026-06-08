@@ -8,11 +8,138 @@ use rand::SeedableRng as _;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::junit::{JunitConfig, JunitReporter};
 use crate::protocol::SubprocessOutcome;
 use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_TEST_CASES};
-use crate::reporter::{Reporter, TestEventReporter};
+use crate::reporter::{
+    MultiReporter, Outcome as ReportOutcome, Reporter, TestEventReporter, TestRef,
+};
 use crate::scheduler::RuntimeArgs;
 use crate::subprocess::{OsSubprocessRunner, SpawnRequest, SubprocessRunner};
+
+fn classify_failed(stderr: &str) -> ReportOutcome {
+    if stderr.contains("panicked at") {
+        ReportOutcome::Panic
+    } else {
+        ReportOutcome::Assertion
+    }
+}
+
+fn test_ref(tc: &crate::registry::TestCase) -> TestRef<'_> {
+    TestRef {
+        name: tc.name,
+        module: tc.module,
+        file: tc.file,
+    }
+}
+
+/// Build the reporter stack from CLI args. Always includes the live console
+/// [`Reporter`]; `--reporter junit` adds a [`JunitReporter`] alongside it.
+fn build_reporter(args: &RuntimeArgs, seed: u64) -> anyhow::Result<MultiReporter> {
+    let mut reporters: Vec<Box<dyn TestEventReporter>> = vec![Box::new(Reporter::new())];
+
+    if let Some(name) = args.reporter.as_deref() {
+        match name {
+            "junit" => {
+                let config = resolve_junit_config(seed)?;
+                reporters.push(Box::new(JunitReporter::new(config)));
+            }
+            other => {
+                return Err(anyhow!(
+                    "cargo-rigtest: unknown --reporter '{other}' (expected 'junit')"
+                ));
+            }
+        }
+    }
+
+    Ok(MultiReporter::new(reporters))
+}
+
+/// Strip a trailing cargo hash suffix (e.g. `acceptance-9dbf02a2431e03ff`)
+/// from a binary stem. Cargo's metadata hash is always 16 ASCII hex chars —
+/// gating on that length prevents mis-stripping legitimate names that happen
+/// to end in hex (e.g. `my-test-cafe`).
+fn strip_hash_suffix(stem: &str) -> &str {
+    if let Some(idx) = stem.rfind('-') {
+        let tail = &stem[idx + 1..];
+        if tail.len() == 16 && tail.chars().all(|c| c.is_ascii_hexdigit()) {
+            return &stem[..idx];
+        }
+    }
+    stem
+}
+
+#[cfg(test)]
+mod tests_strip_hash {
+    use super::strip_hash_suffix;
+
+    #[test]
+    fn strips_16_char_hex_suffix() {
+        assert_eq!(
+            strip_hash_suffix("acceptance-9dbf02a2431e03ff"),
+            "acceptance"
+        );
+    }
+
+    #[test]
+    fn preserves_short_hex_tail() {
+        assert_eq!(strip_hash_suffix("my-test-cafe"), "my-test-cafe");
+    }
+
+    #[test]
+    fn preserves_non_hex_tail() {
+        assert_eq!(strip_hash_suffix("my-test-foobar"), "my-test-foobar");
+    }
+
+    #[test]
+    fn preserves_stem_without_dash() {
+        assert_eq!(strip_hash_suffix("acceptance"), "acceptance");
+    }
+}
+
+fn resolve_junit_config(seed: u64) -> anyhow::Result<JunitConfig> {
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow!("failed to find current executable: {e}"))?;
+    let raw_stem = exe
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rigtest");
+    let binary_stem = strip_hash_suffix(raw_stem).to_string();
+
+    let output_path = match std::env::var("RIGTEST_JUNIT_OUTPUT_PATH").ok() {
+        Some(p) => std::path::PathBuf::from(p),
+        None => default_junit_output_path(&exe),
+    };
+
+    // When the parent invokes us it passes the target name verbatim so the
+    // suite element matches the human-readable name even if the part file
+    // is keyed by a unique executable stem. Fall back to deriving from the
+    // current executable for direct-invocation use cases.
+    let suite_name = std::env::var("RIGTEST_JUNIT_SUITE_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(binary_stem);
+
+    Ok(JunitConfig {
+        output_path,
+        suite_name,
+        seed,
+    })
+}
+
+/// Default to `<target>/rigtest/junit.xml` resolved by walking up from the
+/// current exe to the `target` directory cargo built it into.
+fn default_junit_output_path(exe: &std::path::Path) -> std::path::PathBuf {
+    let target_dir = exe
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "target"))
+        .map(std::path::Path::to_path_buf);
+
+    target_dir
+        .unwrap_or_else(|| std::path::PathBuf::from("target"))
+        .join("rigtest")
+        .join("junit.xml")
+}
 
 fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
@@ -45,9 +172,11 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     state_var: &str,
     state_json: &str,
 ) -> (Outcome, Duration) {
-    reporter.test_started(tc.name);
+    let tref = test_ref(tc);
+    reporter.test_started(tref);
     let test_start = Instant::now();
     let max_attempts = tc.retries + 1;
+    let mut attempt_start = Instant::now();
 
     for attempt in 1..=max_attempts {
         let outcome = runner
@@ -61,14 +190,15 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
 
         let is_last = attempt == max_attempts;
         let duration = test_start.elapsed();
+        let attempt_duration = attempt_start.elapsed();
 
         match outcome {
             Ok(SubprocessOutcome::Passed) => {
-                reporter.test_passed(tc.name, duration);
+                reporter.test_passed(tref, duration);
                 return (Outcome::Passed, duration);
             }
             Ok(SubprocessOutcome::Skipped(reason)) => {
-                reporter.test_skipped(tc.name, duration, &reason);
+                reporter.test_skipped(tref, duration, &reason);
                 return (Outcome::Skipped, duration);
             }
             Ok(SubprocessOutcome::Failed {
@@ -76,28 +206,65 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
                 stdout,
                 stderr,
             }) => {
+                let report_outcome = classify_failed(&stderr);
                 if is_last {
-                    reporter.test_failed(tc.name, duration, &reason, &stdout, &stderr);
+                    reporter.test_failed(tref, duration, report_outcome, &reason, &stdout, &stderr);
                     return (Outcome::Failed, duration);
                 }
-                reporter.test_retrying(tc.name, attempt, max_attempts, &reason);
+                reporter.test_retrying(
+                    tref,
+                    attempt,
+                    max_attempts,
+                    report_outcome,
+                    &reason,
+                    &stdout,
+                    &stderr,
+                    attempt_duration,
+                );
             }
             Ok(SubprocessOutcome::TimedOut(dur)) => {
                 let reason = format!("timed out after {:.1}s", dur.as_secs_f64());
                 if is_last {
-                    reporter.test_failed(tc.name, duration, &reason, "", "");
+                    reporter.test_failed(tref, duration, ReportOutcome::Timeout, &reason, "", "");
                     return (Outcome::Failed, duration);
                 }
-                reporter.test_retrying(tc.name, attempt, max_attempts, &reason);
+                reporter.test_retrying(
+                    tref,
+                    attempt,
+                    max_attempts,
+                    ReportOutcome::Timeout,
+                    &reason,
+                    "",
+                    "",
+                    attempt_duration,
+                );
             }
             Err(e) => {
                 if is_last {
-                    reporter.test_failed(tc.name, duration, &e.to_string(), "", "");
+                    reporter.test_failed(
+                        tref,
+                        duration,
+                        ReportOutcome::Crash,
+                        &e.to_string(),
+                        "",
+                        "",
+                    );
                     return (Outcome::Failed, duration);
                 }
-                reporter.test_retrying(tc.name, attempt, max_attempts, &e.to_string());
+                reporter.test_retrying(
+                    tref,
+                    attempt,
+                    max_attempts,
+                    ReportOutcome::Crash,
+                    &e.to_string(),
+                    "",
+                    "",
+                    attempt_duration,
+                );
             }
         }
+
+        attempt_start = Instant::now();
     }
 
     unreachable!()
@@ -189,7 +356,10 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
         crate::registry::RIG_SSH_CLIENT_CONFIGURATOR.len()
     );
 
-    let reporter = Arc::new(Reporter::new());
+    let mut rng = rand::rng();
+    let seed = args.seed.unwrap_or_else(|| rng.random::<u64>());
+
+    let reporter = Arc::new(build_reporter(&args, seed)?);
 
     let global_setup = RIG_GLOBAL_SETUP.first();
 
@@ -199,8 +369,6 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     } else {
         Box::new(())
     };
-
-    let mut rng = rand::rng();
 
     let state_var = format!("RIG_STATE_{:016x}", rng.random::<u64>());
     let state_json: String = if let Some(entry) = global_setup {
@@ -212,7 +380,6 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     let cases_refs: Vec<&'static crate::registry::TestCase> = RIG_TEST_CASES.iter().collect();
     let mut cases = apply_filter(&cases_refs, args.filter.as_deref());
 
-    let seed = args.seed.unwrap_or_else(|| rng.random::<u64>());
     println!("cargo-rigtest: running with seed {seed}");
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
@@ -248,7 +415,7 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     .await;
 
     let elapsed = suite_start.elapsed();
-    reporter.finish(passed, skipped, total, elapsed);
+    let finish_result = reporter.finish(passed, skipped, total, elapsed);
 
     if let Some(entry) = RIG_GLOBAL_TEARDOWN.first() {
         reporter.print_phase("global teardown");
@@ -259,7 +426,10 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     if failed > 0 {
         Err(anyhow!("Test suite failed: {passed}/{total} passed"))
     } else {
-        Ok(())
+        // Surface a reporter (e.g. JUnit XML) write error as the run's
+        // exit so a CI consumer that promised an artifact gets a hard fail
+        // rather than a misleading green.
+        finish_result
     }
 }
 
@@ -402,6 +572,17 @@ mod tests {
 
     // ── Reporter seam: assert on the event sequence ──────────────────────
 
+    #[test]
+    fn classify_failed_detects_panic_marker() {
+        let panic = "thread 'main' panicked at src/lib.rs:1\n";
+        assert!(matches!(classify_failed(panic), ReportOutcome::Panic));
+        assert!(matches!(
+            classify_failed("error: boom"),
+            ReportOutcome::Assertion
+        ));
+        assert!(matches!(classify_failed(""), ReportOutcome::Assertion));
+    }
+
     #[tokio::test]
     async fn retry_emits_retrying_event_before_passed() {
         let runner = FakeRunner::new(vec![
@@ -421,7 +602,7 @@ mod tests {
         let events = reporter.events();
         assert!(matches!(events[0], Event::Started(ref n) if n == "flaky"));
         assert!(
-            matches!(events[1], Event::Retrying(ref n, 1, 2, _) if n == "flaky"),
+            matches!(events[1], Event::Retrying(ref n, 1, 2, _, _) if n == "flaky"),
             "expected Retrying(flaky, 1/2) at index 1, got {:?}",
             events[1]
         );
