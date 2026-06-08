@@ -1,5 +1,7 @@
 #![warn(clippy::pedantic)]
 
+mod junit;
+
 use std::process::Command;
 use std::process::Stdio;
 
@@ -7,6 +9,12 @@ use anyhow::anyhow;
 use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueEnum;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ReporterKind {
+    Junit,
+}
 
 #[derive(Parser)]
 #[command(name = "cargo", bin_name = "cargo")]
@@ -59,6 +67,11 @@ struct RunArgs {
     /// Show test output in real time rather than capturing it.
     #[arg(long)]
     no_capture: bool,
+
+    /// Reporter to use for run output. Pass `junit` to emit
+    /// `target/rigtest/junit.xml` alongside the live console output.
+    #[arg(long, value_enum, value_name = "REPORTER")]
+    reporter: Option<ReporterKind>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -71,6 +84,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(args: &RunArgs) -> anyhow::Result<()> {
     let mut build_cmd = Command::new("cargo");
     build_cmd
@@ -145,6 +159,11 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
             .collect()
     };
 
+    let junit = match args.reporter {
+        Some(ReporterKind::Junit) => Some(prepare_junit_paths()?),
+        None => None,
+    };
+
     let mut last_code = 0i32;
 
     for (name, executable) in &targets {
@@ -165,6 +184,11 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         if args.no_capture {
             test_cmd.arg("--no-capture");
         }
+        if let Some(paths) = &junit {
+            test_cmd.args(["--reporter", "junit"]);
+            test_cmd.env("RIGTEST_JUNIT_OUTPUT_PATH", paths.part_for(executable));
+            test_cmd.env("RIGTEST_JUNIT_SUITE_NAME", name);
+        }
 
         let status = test_cmd
             .status()
@@ -176,7 +200,96 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(paths) = &junit {
+        let expected: Vec<(&str, std::path::PathBuf)> = targets
+            .iter()
+            .map(|(n, exe)| (n.as_str(), paths.part_for(exe)))
+            .collect();
+        let report = junit::aggregate(&expected);
+        write_aggregate(&paths.final_path, &report)?;
+        println!(
+            "cargo-rigtest: JUnit XML written to {}",
+            paths.final_path.display()
+        );
+    }
+
     std::process::exit(last_code);
+}
+
+struct JunitPaths {
+    parts_dir: std::path::PathBuf,
+    final_path: std::path::PathBuf,
+}
+
+impl JunitPaths {
+    /// Part file path keyed by the executable's filename stem — which
+    /// cargo includes a unique hash in — so two workspace crates with the
+    /// same `[[test]]` target name do not collide on the same part file.
+    fn part_for(&self, executable: &str) -> std::path::PathBuf {
+        let stem = std::path::Path::new(executable)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("part");
+        self.parts_dir.join(format!("{stem}.xml"))
+    }
+}
+
+/// Resolve the cargo target directory (honoring `CARGO_TARGET_DIR`),
+/// clean any pre-existing `rigtest/parts/` so stale results never leak into
+/// the aggregate, and return the well-known paths used during the run.
+fn prepare_junit_paths() -> anyhow::Result<JunitPaths> {
+    let target = cargo_target_dir().context("failed to resolve cargo target directory")?;
+    let parts_dir = target.join("rigtest").join("parts");
+    let final_path = target.join("rigtest").join("junit.xml");
+
+    if parts_dir.exists() {
+        std::fs::remove_dir_all(&parts_dir)
+            .with_context(|| format!("failed to clean {}", parts_dir.display()))?;
+    }
+    std::fs::create_dir_all(&parts_dir)
+        .with_context(|| format!("failed to create {}", parts_dir.display()))?;
+
+    Ok(JunitPaths {
+        parts_dir,
+        final_path,
+    })
+}
+
+fn cargo_target_dir() -> anyhow::Result<std::path::PathBuf> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
+        .context("failed to spawn `cargo metadata`")?;
+    if !output.status.success() {
+        return Err(anyhow!("cargo metadata failed"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("cargo metadata produced invalid JSON")?;
+    let dir = value
+        .get("target_directory")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("cargo metadata missing 'target_directory'"))?;
+    Ok(std::path::PathBuf::from(dir))
+}
+
+fn write_aggregate(path: &std::path::Path, report: &quick_junit::Report) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let xml = report
+        .to_string()
+        .context("failed to serialize aggregated JUnit XML")?;
+    // Atomic write: a crash during serialize/write leaves the previous
+    // aggregate in place rather than a half-written file pretending to be
+    // current.
+    let tmp = path.with_extension("xml.tmp");
+    std::fs::write(&tmp, xml).with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename into {}", path.display()))?;
+    Ok(())
 }
 
 /// Returns true if `exe` is a rig test binary (responds to --rig-probe with exit 0).

@@ -20,6 +20,35 @@ fn indent(s: &str) -> String {
         })
 }
 
+/// Identifies a test case in reporter callbacks.
+///
+/// Carries enough information to render either a terse leaf name (as the live
+/// console reporter does) or a fully-qualified path (as the `JUnit` reporter
+/// does for the `classname` attribute).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TestRef<'a> {
+    pub name: &'a str,
+    pub module: &'a str,
+    /// Reserved for future use by reporters that link to source.
+    #[allow(dead_code)]
+    pub file: &'a str,
+}
+
+/// How a test failed. The trait surface distinguishes the four cases so
+/// reporters can render them appropriately — the `JUnit` reporter maps
+/// `Assertion`/`Panic` to `<failure>` and `Timeout`/`Crash` to `<error>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// Test function returned `Err(_)` from its body.
+    Assertion,
+    /// Test function panicked.
+    Panic,
+    /// Subprocess exceeded its `#[testcase(timeout = ...)]` budget.
+    Timeout,
+    /// Subprocess could not be spawned or its IPC channel failed.
+    Crash,
+}
+
 /// Receives lifecycle events as the orchestrator runs a test suite.
 ///
 /// Implementations include the live TTY [`Reporter`], a [`NullReporter`] that
@@ -29,13 +58,41 @@ fn indent(s: &str) -> String {
 /// `Send + Sync + 'static` so a single reporter can be shared via `Arc`
 /// across `JoinSet`-spawned tasks for parallel dispatch.
 pub(crate) trait TestEventReporter: Send + Sync + 'static {
-    fn test_started(&self, name: &str);
-    fn test_passed(&self, name: &str, duration: Duration);
-    fn test_skipped(&self, name: &str, duration: Duration, reason: &str);
-    fn test_failed(&self, name: &str, duration: Duration, reason: &str, stdout: &str, stderr: &str);
-    fn test_retrying(&self, name: &str, attempt: u32, max_attempts: u32, reason: &str);
+    fn test_started(&self, test: TestRef<'_>);
+    fn test_passed(&self, test: TestRef<'_>, duration: Duration);
+    fn test_skipped(&self, test: TestRef<'_>, duration: Duration, reason: &str);
+    fn test_failed(
+        &self,
+        test: TestRef<'_>,
+        duration: Duration,
+        outcome: Outcome,
+        reason: &str,
+        stdout: &str,
+        stderr: &str,
+    );
+    #[allow(clippy::too_many_arguments)]
+    fn test_retrying(
+        &self,
+        test: TestRef<'_>,
+        attempt: u32,
+        max_attempts: u32,
+        outcome: Outcome,
+        reason: &str,
+        stdout: &str,
+        stderr: &str,
+        duration: Duration,
+    );
     fn print_phase(&self, label: &str);
-    fn finish(&self, passed: usize, skipped: usize, total: usize, elapsed: Duration);
+    /// Called once at the end of the run. Returning `Err` causes the test
+    /// binary to exit non-zero so a CI consumer can tell that an artifact
+    /// the reporter promised (e.g. the `JUnit` XML file) was not produced.
+    fn finish(
+        &self,
+        passed: usize,
+        skipped: usize,
+        total: usize,
+        elapsed: Duration,
+    ) -> anyhow::Result<()>;
 }
 
 /// Nextest-style reporter. In a TTY it shows live spinners per running test;
@@ -116,7 +173,7 @@ impl Reporter {
 }
 
 impl TestEventReporter for Reporter {
-    fn test_started(&self, name: &str) {
+    fn test_started(&self, test: TestRef<'_>) {
         if !self.is_tty {
             return;
         }
@@ -124,42 +181,43 @@ impl TestEventReporter for Reporter {
         pb.set_style(
             ProgressStyle::with_template("{spinner:.cyan} {msg}").expect("valid spinner template"),
         );
-        pb.set_message(format!("{} {}", style("RUNNING").cyan().bold(), name));
+        pb.set_message(format!("{} {}", style("RUNNING").cyan().bold(), test.name));
         pb.enable_steady_tick(Duration::from_millis(80));
         self.spinners
             .lock()
             .expect("spinners mutex")
-            .insert(name.to_string(), pb);
+            .insert(test.name.to_string(), pb);
     }
 
-    fn test_passed(&self, name: &str, duration: Duration) {
+    fn test_passed(&self, test: TestRef<'_>, duration: Duration) {
         let line = format!(
             "{} [{:.3}s] {}",
             style("PASS").green().bold(),
             duration.as_secs_f64(),
-            name,
+            test.name,
         );
-        self.finalize_spinner(name, &line);
+        self.finalize_spinner(test.name, &line);
     }
 
-    fn test_skipped(&self, name: &str, duration: Duration, reason: &str) {
+    fn test_skipped(&self, test: TestRef<'_>, duration: Duration, reason: &str) {
         let mut line = format!(
             "{} [{:.3}s] {}",
             style("SKIP").yellow().bold(),
             duration.as_secs_f64(),
-            name,
+            test.name,
         );
         if !reason.is_empty() {
             use std::fmt::Write as _;
             let _ = write!(line, ": {reason}");
         }
-        self.finalize_spinner(name, &line);
+        self.finalize_spinner(test.name, &line);
     }
 
     fn test_failed(
         &self,
-        name: &str,
+        test: TestRef<'_>,
         duration: Duration,
+        _outcome: Outcome,
         reason: &str,
         stdout: &str,
         stderr: &str,
@@ -168,21 +226,31 @@ impl TestEventReporter for Reporter {
             "{} [{:.3}s] {}: {}",
             style("FAIL").red().bold(),
             duration.as_secs_f64(),
-            name,
+            test.name,
             reason,
         );
-        self.finalize_spinner(name, &header);
+        self.finalize_spinner(test.name, &header);
         self.print_captured("stdout", stdout);
         self.print_captured("stderr", stderr);
     }
 
-    fn test_retrying(&self, name: &str, attempt: u32, max_attempts: u32, reason: &str) {
+    fn test_retrying(
+        &self,
+        test: TestRef<'_>,
+        attempt: u32,
+        max_attempts: u32,
+        _outcome: Outcome,
+        reason: &str,
+        _stdout: &str,
+        _stderr: &str,
+        _duration: Duration,
+    ) {
         let line = format!(
             "{} [{}/{}] {}: {}",
             style("RETRY").yellow().bold(),
             attempt,
             max_attempts,
-            name,
+            test.name,
             reason,
         );
         if self.is_tty {
@@ -201,7 +269,13 @@ impl TestEventReporter for Reporter {
         }
     }
 
-    fn finish(&self, passed: usize, skipped: usize, total: usize, elapsed: Duration) {
+    fn finish(
+        &self,
+        passed: usize,
+        skipped: usize,
+        total: usize,
+        elapsed: Duration,
+    ) -> anyhow::Result<()> {
         let failed = total - passed - skipped;
         let separator = style("─".repeat(60)).dim().to_string();
 
@@ -236,6 +310,104 @@ impl TestEventReporter for Reporter {
             eprintln!("{separator}");
             eprintln!("{summary}");
         }
+        Ok(())
+    }
+}
+
+/// Fans out lifecycle events to several reporters in registration order.
+///
+/// Used when `--reporter junit` is active to drive both the live console
+/// [`Reporter`] and a [`JunitReporter`][crate::junit::JunitReporter] from the
+/// same orchestrator dispatch.
+pub(crate) struct MultiReporter {
+    reporters: Vec<Box<dyn TestEventReporter>>,
+}
+
+impl MultiReporter {
+    pub(crate) fn new(reporters: Vec<Box<dyn TestEventReporter>>) -> Self {
+        Self { reporters }
+    }
+}
+
+impl TestEventReporter for MultiReporter {
+    fn test_started(&self, test: TestRef<'_>) {
+        for r in &self.reporters {
+            r.test_started(test);
+        }
+    }
+    fn test_passed(&self, test: TestRef<'_>, duration: Duration) {
+        for r in &self.reporters {
+            r.test_passed(test, duration);
+        }
+    }
+    fn test_skipped(&self, test: TestRef<'_>, duration: Duration, reason: &str) {
+        for r in &self.reporters {
+            r.test_skipped(test, duration, reason);
+        }
+    }
+    fn test_failed(
+        &self,
+        test: TestRef<'_>,
+        duration: Duration,
+        outcome: Outcome,
+        reason: &str,
+        stdout: &str,
+        stderr: &str,
+    ) {
+        for r in &self.reporters {
+            r.test_failed(test, duration, outcome, reason, stdout, stderr);
+        }
+    }
+    fn test_retrying(
+        &self,
+        test: TestRef<'_>,
+        attempt: u32,
+        max_attempts: u32,
+        outcome: Outcome,
+        reason: &str,
+        stdout: &str,
+        stderr: &str,
+        duration: Duration,
+    ) {
+        for r in &self.reporters {
+            r.test_retrying(
+                test,
+                attempt,
+                max_attempts,
+                outcome,
+                reason,
+                stdout,
+                stderr,
+                duration,
+            );
+        }
+    }
+    fn print_phase(&self, label: &str) {
+        for r in &self.reporters {
+            r.print_phase(label);
+        }
+    }
+    fn finish(
+        &self,
+        passed: usize,
+        skipped: usize,
+        total: usize,
+        elapsed: Duration,
+    ) -> anyhow::Result<()> {
+        // Drive every reporter even if one fails so the live console summary
+        // still prints. Return the first error so a JUnit write failure is
+        // surfaced as a non-zero exit even when the console reporter
+        // afterwards returns Ok.
+        let mut first_err: Option<anyhow::Error> = None;
+        for r in &self.reporters {
+            if let Err(e) = r.finish(passed, skipped, total, elapsed) {
+                first_err.get_or_insert(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
@@ -248,21 +420,41 @@ pub(crate) struct NullReporter;
 
 #[cfg(test)]
 impl TestEventReporter for NullReporter {
-    fn test_started(&self, _name: &str) {}
-    fn test_passed(&self, _name: &str, _duration: Duration) {}
-    fn test_skipped(&self, _name: &str, _duration: Duration, _reason: &str) {}
+    fn test_started(&self, _test: TestRef<'_>) {}
+    fn test_passed(&self, _test: TestRef<'_>, _duration: Duration) {}
+    fn test_skipped(&self, _test: TestRef<'_>, _duration: Duration, _reason: &str) {}
     fn test_failed(
         &self,
-        _name: &str,
+        _test: TestRef<'_>,
         _duration: Duration,
+        _outcome: Outcome,
         _reason: &str,
         _stdout: &str,
         _stderr: &str,
     ) {
     }
-    fn test_retrying(&self, _name: &str, _attempt: u32, _max_attempts: u32, _reason: &str) {}
+    fn test_retrying(
+        &self,
+        _test: TestRef<'_>,
+        _attempt: u32,
+        _max_attempts: u32,
+        _outcome: Outcome,
+        _reason: &str,
+        _stdout: &str,
+        _stderr: &str,
+        _duration: Duration,
+    ) {
+    }
     fn print_phase(&self, _label: &str) {}
-    fn finish(&self, _passed: usize, _skipped: usize, _total: usize, _elapsed: Duration) {}
+    fn finish(
+        &self,
+        _passed: usize,
+        _skipped: usize,
+        _total: usize,
+        _elapsed: Duration,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Captures the sequence of events for assertions in tests.
@@ -272,8 +464,8 @@ pub(crate) enum Event {
     Started(String),
     Passed(String),
     Skipped(String, String),
-    Failed(String, String),
-    Retrying(String, u32, u32, String),
+    Failed(String, Outcome, String),
+    Retrying(String, u32, u32, Outcome, String),
     Phase(String),
     Finished(usize, usize, usize),
 }
@@ -298,28 +490,29 @@ impl RecordingReporter {
 
 #[cfg(test)]
 impl TestEventReporter for RecordingReporter {
-    fn test_started(&self, name: &str) {
+    fn test_started(&self, test: TestRef<'_>) {
         self.events
             .lock()
             .expect("events mutex")
-            .push(Event::Started(name.to_string()));
+            .push(Event::Started(test.name.to_string()));
     }
-    fn test_passed(&self, name: &str, _duration: Duration) {
+    fn test_passed(&self, test: TestRef<'_>, _duration: Duration) {
         self.events
             .lock()
             .expect("events mutex")
-            .push(Event::Passed(name.to_string()));
+            .push(Event::Passed(test.name.to_string()));
     }
-    fn test_skipped(&self, name: &str, _duration: Duration, reason: &str) {
+    fn test_skipped(&self, test: TestRef<'_>, _duration: Duration, reason: &str) {
         self.events
             .lock()
             .expect("events mutex")
-            .push(Event::Skipped(name.to_string(), reason.to_string()));
+            .push(Event::Skipped(test.name.to_string(), reason.to_string()));
     }
     fn test_failed(
         &self,
-        name: &str,
+        test: TestRef<'_>,
         _duration: Duration,
+        outcome: Outcome,
         reason: &str,
         _stdout: &str,
         _stderr: &str,
@@ -327,16 +520,31 @@ impl TestEventReporter for RecordingReporter {
         self.events
             .lock()
             .expect("events mutex")
-            .push(Event::Failed(name.to_string(), reason.to_string()));
+            .push(Event::Failed(
+                test.name.to_string(),
+                outcome,
+                reason.to_string(),
+            ));
     }
-    fn test_retrying(&self, name: &str, attempt: u32, max_attempts: u32, reason: &str) {
+    fn test_retrying(
+        &self,
+        test: TestRef<'_>,
+        attempt: u32,
+        max_attempts: u32,
+        outcome: Outcome,
+        reason: &str,
+        _stdout: &str,
+        _stderr: &str,
+        _duration: Duration,
+    ) {
         self.events
             .lock()
             .expect("events mutex")
             .push(Event::Retrying(
-                name.to_string(),
+                test.name.to_string(),
                 attempt,
                 max_attempts,
+                outcome,
                 reason.to_string(),
             ));
     }
@@ -346,10 +554,17 @@ impl TestEventReporter for RecordingReporter {
             .expect("events mutex")
             .push(Event::Phase(label.to_string()));
     }
-    fn finish(&self, passed: usize, skipped: usize, total: usize, _elapsed: Duration) {
+    fn finish(
+        &self,
+        passed: usize,
+        skipped: usize,
+        total: usize,
+        _elapsed: Duration,
+    ) -> anyhow::Result<()> {
         self.events
             .lock()
             .expect("events mutex")
             .push(Event::Finished(passed, skipped, total));
+        Ok(())
     }
 }

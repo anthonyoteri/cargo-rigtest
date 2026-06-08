@@ -21,6 +21,12 @@ pub struct RuntimeArgs {
     #[arg(long)]
     pub no_capture: bool,
 
+    /// Reporter(s) to use for run output. Pass `junit` to additionally emit a
+    /// `JUnit` XML document at `target/rigtest/junit.xml` (or the path in
+    /// `RIGTEST_JUNIT_OUTPUT_PATH` when set by the parent).
+    #[arg(long, value_name = "REPORTER")]
+    pub reporter: Option<String>,
+
     // ── Internal flags used in subprocess (single-test) mode ─────────────────
     // Hidden from `--help`; set by the coordinator when spawning per-test
     // subprocesses.
