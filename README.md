@@ -368,6 +368,29 @@ to default to `localhost`.
 
 ---
 
+## JUnit XML output
+
+For CI systems that consume JUnit reports — Jenkins, GitLab CI, Buildkite,
+CircleCI, and others — pass `--reporter junit`:
+
+```
+cargo rigtest run --reporter junit
+```
+
+This writes `target/rigtest/junit.xml` alongside the normal live console
+output. The document uses the standard JUnit schema with the
+`<flakyFailure>` and `<rerunFailure>` extensions for retried tests, so
+existing JUnit-based integrations consume it without changes.
+
+In a Jenkins pipeline, point the `junit` step at the file after the run:
+
+```groovy
+sh 'cargo rigtest run --reporter junit'
+junit 'target/rigtest/junit.xml'
+```
+
+---
+
 ## Running tests
 
 ```
@@ -382,6 +405,7 @@ cargo rigtest run [OPTIONS]
 | `--test <NAME>` | Only run the named test target (repeatable: `--test a --test b`) |
 | `--package <NAME>` | Package containing the test targets |
 | `--no-capture` | Print test output in real time instead of capturing it (implies `--jobs 1`) |
+| `--reporter <KIND>` | Additional reporter to run alongside the console. `junit` emits `target/rigtest/junit.xml` (see above) |
 
 The seed is printed at the start of every run so a failing order can be
 reproduced exactly:
