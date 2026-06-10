@@ -5,6 +5,15 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.4.0](https://github.com/anthonyoteri/cargo-rigtest/compare/41bd2cec6699f4d3a7b9606f83c63722818f9c34..v0.4.0) - 2026-06-10
+#### Features
+- (**reporter**) add --reporter junit for JUnit XML output - ([41bd2ce](https://github.com/anthonyoteri/cargo-rigtest/commit/41bd2cec6699f4d3a7b9606f83c63722818f9c34)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Documentation
+- (**readme**) document --reporter junit for CI integrations - ([fdfc7a0](https://github.com/anthonyoteri/cargo-rigtest/commit/fdfc7a0f26a70e61874d3e9b29d57174699fc143)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**readme**) rework overview with feature comparison table - ([1ed8af6](https://github.com/anthonyoteri/cargo-rigtest/commit/1ed8af6464c1e3519ab3d6241cafb59a419d59ae)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.3.1](https://github.com/anthonyoteri/cargo-rigtest/compare/87e00b1feefe8f044db8de93b1a52ffe3fde7c70..v0.3.1) - 2026-06-05
 #### Refactoring
 - (**orchestrator**) add TestEventReporter trait and dispatch-level tests - ([0808363](https://github.com/anthonyoteri/cargo-rigtest/commit/08083633dffbe7923cabcd816dd31758810a107e)) - [@anthonyoteri](https://github.com/anthonyoteri)
