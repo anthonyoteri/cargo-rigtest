@@ -23,24 +23,30 @@ and integration tests that compile and run a local binary. The third layer
 — *acceptance tests against a deployed system* — is almost always handled
 by reaching for another tool: pytest, Postman, shell scripts.
 
-`cargo-rigtest` closes that gap. It is a Cargo plugin for running
-acceptance and end-to-end tests against real, deployed infrastructure —
-the kind of tests you run after a deploy to staging to confirm the system
-behaves as intended under real conditions, with real traffic and real
-service dependencies.
+`cargo-rigtest` closes that gap. It offers the kind of process-level
+isolation and parallel execution you'd expect from a modern Rust test
+runner, and pairs that with the lifecycle hooks and clients that
+acceptance testing against a real system actually needs:
 
-**The motivating use case:** a service is deployed to a staging
-environment. Before promoting to production, you want to verify that the
-signup flow completes, authenticated requests are accepted, and data
-persists correctly. These aren't unit tests — the binary is already
-compiled and running. They aren't local integration tests — there's nothing
-to mock. They're acceptance tests, and `cargo-rigtest` lets you write them
-in Rust.
+| Feature                          | cargo-test | cargo-nextest | cargo-rigtest |
+|----------------------------------|:----------:|:-------------:|:-------------:|
+| Process isolation per test       |     —      |       ✓       |       ✓       |
+| Captured output on failure       |     —      |       ✓       |       ✓       |
+| Per-test timeout / retries       |     —      |     ✓¹       |       ✓       |
+| Global setup / teardown          |     —      |       —       |       ✓       |
+| Per-test setup / teardown        |     —      |       —       |       ✓       |
+| Built-in HTTP client             |     —      |       —       |       ✓       |
+| Built-in SSH client              |     —      |       —       |       ✓       |
 
-Unlike a Python test harness bolted onto a Rust project, `cargo-rigtest`
-lives entirely inside your Cargo workspace. Test code can import your own
-types, reuse your HTTP client configuration, and be checked by the same
-compiler and CI pipeline as the rest of your project.
+¹ via config file
+
+The motivating case: a service is deployed to staging; before promoting
+to production you want to verify the signup flow completes, authenticated
+requests are accepted, and data persists correctly. The binary is already
+running. There's nothing to mock. These are acceptance tests — written
+in Rust, living inside your Cargo workspace, type-checked by the same
+compiler as the rest of your code. Local binary tests still work fine;
+deployed systems are just where rigtest is sharpest.
 
 ---
 
