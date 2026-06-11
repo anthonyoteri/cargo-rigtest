@@ -127,9 +127,7 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_HTTP_CLIENT_CONFIGURATOR)]
             #[linkme(crate = ::rigtest::__linkme)]
             static __RIGTEST_HTTP_CLIENT_CONFIGURATOR: ::rigtest::registry::HttpClientConfiguratorEntry =
-                ::rigtest::registry::HttpClientConfiguratorEntry {
-                    configure_fn: #configure_fn,
-                };
+                ::rigtest::registry::HttpClientConfiguratorEntry::new(#configure_fn);
         }
     });
 
@@ -139,9 +137,7 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_SSH_CLIENT_CONFIGURATOR)]
             #[linkme(crate = ::rigtest::__linkme)]
             static __RIGTEST_SSH_CLIENT_CONFIGURATOR: ::rigtest::registry::SshClientConfiguratorEntry =
-                ::rigtest::registry::SshClientConfiguratorEntry {
-                    configure_fn: #configure_fn,
-                };
+                ::rigtest::registry::SshClientConfiguratorEntry::new(#configure_fn);
         }
     });
 
@@ -260,15 +256,15 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
         #[linkme(crate = ::rigtest::__linkme)]
         static #static_ident: ::rigtest::registry::TestCase =
-            ::rigtest::registry::TestCase {
-                name: #func_name_str,
-                module: module_path!(),
-                file: file!(),
-                serial: #serial,
-                timeout: #timeout_tokens,
-                retries: #retries_tokens,
-                test_fn: |ctx| ::std::boxed::Box::pin(async move { #func_ident(ctx).await }),
-            };
+            ::rigtest::registry::TestCase::new(
+                #func_name_str,
+                module_path!(),
+                file!(),
+                #serial,
+                #timeout_tokens,
+                #retries_tokens,
+                |ctx| ::std::boxed::Box::pin(async move { #func_ident(ctx).await }),
+            );
     };
 
     TokenStream::from(expanded)
@@ -328,27 +324,27 @@ pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_GLOBAL_SETUP)]
         #[linkme(crate = ::rigtest::__linkme)]
         static __RIGTEST_GLOBAL_SETUP: ::rigtest::registry::GlobalSetupEntry =
-            ::rigtest::registry::GlobalSetupEntry {
-                setup_fn: || {
+            ::rigtest::registry::GlobalSetupEntry::new(
+                || {
                     ::std::boxed::Box::pin(async {
                         ::std::boxed::Box::new(#func_ident().await)
                             as ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>
                     })
                 },
-                serialize_fn: |boxed| {
+                |boxed| {
                     let concrete = boxed
                         .downcast_ref::<#return_type>()
                         .expect("cargo-rigtest: global_setup serialize type mismatch");
                     ::rigtest::__serde_json::to_string(concrete)
                         .expect("cargo-rigtest: failed to serialize global state")
                 },
-                deserialize_fn: |s| {
+                |s| {
                     let concrete = ::rigtest::__serde_json::from_str::<#return_type>(s)
                         .expect("cargo-rigtest: failed to deserialize global state");
                     ::std::boxed::Box::new(concrete)
                         as ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>
                 },
-            };
+            );
     };
 
     TokenStream::from(expanded)
@@ -417,16 +413,14 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_GLOBAL_TEARDOWN)]
         #[linkme(crate = ::rigtest::__linkme)]
         static __RIGTEST_GLOBAL_TEARDOWN: ::rigtest::registry::GlobalTeardownEntry =
-            ::rigtest::registry::GlobalTeardownEntry {
-                teardown_fn: |boxed| {
-                    ::std::boxed::Box::pin(async move {
-                        let concrete = *boxed
-                            .downcast::<#param_type>()
-                            .expect("global_teardown type mismatch");
-                        #func_ident(concrete).await
-                    })
-                },
-            };
+            ::rigtest::registry::GlobalTeardownEntry::new(|boxed| {
+                ::std::boxed::Box::pin(async move {
+                    let concrete = *boxed
+                        .downcast::<#param_type>()
+                        .expect("global_teardown type mismatch");
+                    #func_ident(concrete).await
+                })
+            });
     };
 
     TokenStream::from(expanded)
