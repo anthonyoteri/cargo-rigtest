@@ -25,8 +25,12 @@ pub type TestFn = fn(Arc<crate::context::TestContext>) -> BoxFuture<'static, Res
 /// A single test case registered at compile time via `#[testcase]`.
 ///
 /// The `#[testcase]` attribute macro fills all fields automatically from the
-/// annotated function and its attribute arguments. You should not construct
-/// `TestCase` values manually.
+/// annotated function and its attribute arguments.
+///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — use the `#[testcase]` macro.
+#[non_exhaustive]
 pub struct TestCase {
     /// The test name as it appears in output and filter expressions.
     ///
@@ -62,6 +66,32 @@ pub struct TestCase {
     pub test_fn: TestFn,
 }
 
+impl TestCase {
+    /// Constructs a [`TestCase`]. Intended for use by the `#[testcase]`
+    /// proc macro; not part of the stable public API.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        module: &'static str,
+        file: &'static str,
+        serial: bool,
+        timeout: Option<std::time::Duration>,
+        retries: u32,
+        test_fn: TestFn,
+    ) -> Self {
+        Self {
+            name,
+            module,
+            file,
+            serial,
+            timeout,
+            retries,
+            test_fn,
+        }
+    }
+}
+
 // linkme requires Sync
 unsafe impl Sync for TestCase {}
 
@@ -72,9 +102,14 @@ unsafe impl Sync for TestCase {}
 /// to each test subprocess via an environment variable and [`deserialize_fn`]
 /// to reconstruct it inside each subprocess.
 ///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — use the `#[global_setup]` macro.
+///
 /// [`setup_fn`]: GlobalSetupEntry::setup_fn
 /// [`serialize_fn`]: GlobalSetupEntry::serialize_fn
 /// [`deserialize_fn`]: GlobalSetupEntry::deserialize_fn
+#[non_exhaustive]
 pub struct GlobalSetupEntry {
     /// Invokes the user's `#[global_setup]` function and returns its value as a
     /// type-erased `Box<dyn Any + Send + Sync>`.
@@ -89,6 +124,24 @@ pub struct GlobalSetupEntry {
     pub deserialize_fn: fn(&str) -> Box<dyn std::any::Any + Send + Sync>,
 }
 
+impl GlobalSetupEntry {
+    /// Constructs a [`GlobalSetupEntry`]. Intended for use by the
+    /// `#[global_setup]` proc macro; not part of the stable public API.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        setup_fn: fn() -> BoxFuture<'static, Box<dyn std::any::Any + Send + Sync>>,
+        serialize_fn: fn(&(dyn std::any::Any + Send + Sync)) -> String,
+        deserialize_fn: fn(&str) -> Box<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        Self {
+            setup_fn,
+            serialize_fn,
+            deserialize_fn,
+        }
+    }
+}
+
 unsafe impl Sync for GlobalSetupEntry {}
 
 /// A global teardown function registered at compile time via `#[global_teardown]`.
@@ -96,11 +149,28 @@ unsafe impl Sync for GlobalSetupEntry {}
 /// At most one entry may exist per test binary. The runtime calls [`teardown_fn`]
 /// once after all tests have run, passing the state produced by `#[global_setup]`.
 ///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — use the `#[global_teardown]` macro.
+///
 /// [`teardown_fn`]: GlobalTeardownEntry::teardown_fn
+#[non_exhaustive]
 pub struct GlobalTeardownEntry {
     /// Invokes the user's `#[global_teardown]` function with the type-erased global
     /// state, consuming it.
     pub teardown_fn: fn(Box<dyn std::any::Any + Send + Sync>) -> BoxFuture<'static, ()>,
+}
+
+impl GlobalTeardownEntry {
+    /// Constructs a [`GlobalTeardownEntry`]. Intended for use by the
+    /// `#[global_teardown]` proc macro; not part of the stable public API.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        teardown_fn: fn(Box<dyn std::any::Any + Send + Sync>) -> BoxFuture<'static, ()>,
+    ) -> Self {
+        Self { teardown_fn }
+    }
 }
 
 unsafe impl Sync for GlobalTeardownEntry {}
@@ -131,14 +201,32 @@ pub static RIG_GLOBAL_TEARDOWN: [GlobalTeardownEntry];
 /// [`configure_fn`] with a fresh [`reqwest::ClientBuilder`] before each test
 /// subprocess runs, and uses the returned builder to construct `ctx.client`.
 ///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — use `#[rigtest::main(http_client = ...)]`.
+///
 /// [`configure_fn`]: HttpClientConfiguratorEntry::configure_fn
 #[cfg(feature = "http-client")]
+#[non_exhaustive]
 pub struct HttpClientConfiguratorEntry {
     /// Calls the user's configure function, returning a modified builder or an error.
     ///
     /// On error the test subprocess exits with a descriptive message before
     /// running any test logic.
     pub configure_fn: fn(reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, BoxError>,
+}
+
+#[cfg(feature = "http-client")]
+impl HttpClientConfiguratorEntry {
+    /// Constructs an [`HttpClientConfiguratorEntry`]. Intended for use by the
+    /// `#[rigtest::main]` proc macro; not part of the stable public API.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        configure_fn: fn(reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, BoxError>,
+    ) -> Self {
+        Self { configure_fn }
+    }
 }
 
 // linkme requires Sync
@@ -166,13 +254,34 @@ pub static RIG_HTTP_CLIENT_CONFIGURATOR: [HttpClientConfiguratorEntry];
 /// [`openssh`], which requires the system `ssh` binary and is not supported on
 /// non-Unix targets.
 ///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — use `#[rigtest::main(ssh_client = ...)]`.
+///
 /// [`configure_fn`]: SshClientConfiguratorEntry::configure_fn
 #[cfg(all(feature = "ssh-client", unix))]
+#[non_exhaustive]
 pub struct SshClientConfiguratorEntry {
     /// Calls the user's configure function with the destination and a fresh builder,
     /// returning a modified builder or an error.
     pub configure_fn:
         fn(&str, openssh::SessionBuilder) -> Result<openssh::SessionBuilder, BoxError>,
+}
+
+#[cfg(all(feature = "ssh-client", unix))]
+impl SshClientConfiguratorEntry {
+    /// Constructs an [`SshClientConfiguratorEntry`]. Intended for use by the
+    /// `#[rigtest::main]` proc macro; not part of the stable public API.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        configure_fn: fn(
+            &str,
+            openssh::SessionBuilder,
+        ) -> Result<openssh::SessionBuilder, BoxError>,
+    ) -> Self {
+        Self { configure_fn }
+    }
 }
 
 // linkme requires Sync

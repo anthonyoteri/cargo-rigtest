@@ -1,8 +1,13 @@
 use clap::Parser;
 
 /// Arguments forwarded from `cargo rig run` into the test binary.
+///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — use [`clap::Parser`] to parse arguments from a command line.
 #[derive(Parser, Debug)]
 #[command(about = "Run the cargo-rigtest acceptance test suite")]
+#[non_exhaustive]
 pub struct RuntimeArgs {
     /// Maximum number of parallel test jobs [default: number of CPUs].
     #[arg(short, long)]

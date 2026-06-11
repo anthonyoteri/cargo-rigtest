@@ -7,6 +7,12 @@ use futures::FutureExt;
 use tokio::sync::OnceCell;
 
 /// Shared context passed to every test function.
+///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — test authors receive an already-constructed `Arc<TestContext>` as
+/// the argument to their test function.
+#[non_exhaustive]
 pub struct TestContext {
     /// Data produced by `#[global_setup]`, available to all tests.
     pub global_data: Arc<Box<dyn Any + Send + Sync>>,
@@ -25,11 +31,12 @@ impl TestContext {
     /// This is called by the cargo-rigtest coordinator inside each test subprocess
     /// before invoking the test function. Test authors receive an already-constructed
     /// `Arc<TestContext>` as the argument to their test function and do not call
-    /// this directly.
+    /// this directly. Not part of the stable public API.
     ///
     /// # Errors
     ///
     /// Returns an error if an internal invariant is violated during construction.
+    #[doc(hidden)]
     pub fn new(global_data: Box<dyn Any + Send + Sync>) -> Result<Arc<Self>, crate::Error> {
         Ok(Arc::new(Self {
             global_data: Arc::new(global_data),
