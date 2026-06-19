@@ -8,6 +8,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(about = "Run the cargo-rigtest acceptance test suite")]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // CLI flags; not state to model.
 pub struct RuntimeArgs {
     /// Maximum number of parallel test jobs [default: number of CPUs].
     #[arg(short, long)]
@@ -42,6 +43,11 @@ pub struct RuntimeArgs {
     /// `RIGTEST_JUNIT_OUTPUT_PATH` when set by the parent).
     #[arg(long, value_name = "REPORTER")]
     pub reporter: Option<String>,
+
+    /// Skip the preflight phase entirely. Tests run regardless of whether
+    /// declared external dependencies are reachable.
+    #[arg(long)]
+    pub no_preflight: bool,
 
     // ── Internal flags used in subprocess (single-test) mode ─────────────────
     // Hidden from `--help`; set by the coordinator when spawning per-test
