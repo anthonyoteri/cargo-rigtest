@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 keywords = ["testing", "cargo", "macros", "integration-testing", "proc-macro"]
 categories = ["development-tools::testing"]
 exclude = ["/.github", "/examples"]
