@@ -1,0 +1,71 @@
+name: DCO
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: dco
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by trailer on every PR commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}")
+
+          if [ -z "${commits}" ]; then
+            echo "No commits in PR range; nothing to check."
+            exit 0
+          fi
+
+          missing=0
+          checked=0
+          skipped=0
+
+          for sha in ${commits}; do
+            author=$(git log -1 --format='%an' "${sha}")
+            subject=$(git log -1 --format='%s' "${sha}")
+
+            # Bot accounts (e.g. dependabot[bot], renovate[bot], github-actions[bot],
+            # copilot[bot]) cannot meaningfully sign off as humans, so they are
+            # exempted from the DCO check.
+            if printf '%s' "${author}" | grep -qiE '\[bot\]$'; then
+              echo "skip (bot): ${sha} ${author} - ${subject}"
+              skipped=$((skipped + 1))
+              continue
+            fi
+
+            if git log -1 --format='%B' "${sha}" | grep -qE '^Signed-off-by: '; then
+              echo "ok:        ${sha} ${author} - ${subject}"
+              checked=$((checked + 1))
+            else
+              echo "MISSING:   ${sha} ${author} - ${subject}"
+              echo "           commit is missing a 'Signed-off-by:' trailer"
+              missing=$((missing + 1))
+            fi
+          done
+
+          echo
+          echo "Summary: ${checked} signed, ${skipped} bot-exempt, ${missing} missing sign-off."
+
+          if [ "${missing}" -gt 0 ]; then
+            echo
+            echo "One or more commits are missing a Signed-off-by trailer."
+            echo "Sign existing commits with: git rebase --signoff main"
+            echo "Sign new commits with:      git commit -s"
+            echo "See CONTRIBUTING.md and https://developercertificate.org"
+            exit 1
+          fi
