@@ -63,6 +63,17 @@ cargo test -p rigtest-example-basic
 
 Releases are managed with [cocogitto](https://docs.cocogitto.io/). The release workflow runs via GitHub Actions on `workflow_dispatch`. See `cog.toml` for configuration.
 
+## AI-assisted contributions
+
+AI tools (Claude, Copilot, Cursor, and similar) are welcome here. The only firm requirement is that a human is in the loop: someone has to shape the change, read every line, and stand behind it on review.
+
+To keep the review queue honest, contributors self-categorize PRs with one of two repository labels. Either, both, or neither may apply:
+
+- **`AI Assisted`** — you used an AI tool to help with the change, but the work is primarily yours. You drove the design, reviewed the output, and would defend the code in review on your own. Treated identically to any other PR.
+- **`AI Generated`** — the change was substantially produced by an AI agent with minimal human shaping. These are evaluated honestly on their merits; expect a higher bar, since there's less human judgement baked in.
+
+Disclosure is for transparency, not stigma. An honest `AI Generated` label is fine; what isn't fine is using AI heavily and not saying so. Undisclosed AI use that's discovered later will be treated as a process violation.
+
 ## License
 
 By contributing, you agree that your contributions will be dual-licensed under MIT OR Apache-2.0, matching the project license.
