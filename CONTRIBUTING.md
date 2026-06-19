@@ -44,6 +44,39 @@ feat!: rename ctx.state to ctx.global_data
 BREAKING CHANGE: TestContext.state has been renamed to TestContext.global_data.
 ```
 
+## Sign-off
+
+Every commit must carry a `Signed-off-by:` trailer. Signing off means asserting
+that you have the right to contribute the change under the project's license —
+see the [Developer Certificate of Origin](https://developercertificate.org) for
+the exact text you are agreeing to.
+
+Add the trailer when you commit:
+
+```
+git commit -s
+```
+
+To retroactively sign off the most recent commit:
+
+```
+git commit -s --amend
+```
+
+To sign off every commit on a branch:
+
+```
+git rebase --signoff main
+```
+
+The trailer looks like `Signed-off-by: Your Name <you@example.com>` and the
+name and email must match the commit author. CI rejects PRs whose commits are
+missing this trailer.
+
+Bot accounts (Dependabot, Renovate, `github-actions[bot]`, Copilot, and
+anything else with a `[bot]` suffix) are exempted automatically — they cannot
+meaningfully sign off as humans.
+
 ## Crate layout
 
 | Crate | Purpose |
