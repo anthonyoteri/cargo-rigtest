@@ -199,6 +199,7 @@ fn preflight() -> Preflight {
         .tcp("api", "127.0.0.1:8080")
         .timeout(Duration::from_millis(500))
         .env("home_is_set", "HOME")
+        .dns("api_dns", "example.com")
 }
 ```
 
@@ -213,18 +214,40 @@ is planned for a later release.
 |-----------|----------------|-----------------|-------------|
 | TCP | `Preflight::tcp(name, "host:port")` | 1 second | A TCP connection to the target establishes within the timeout |
 | Env | `Preflight::env(name, "VAR")` | n/a (synchronous) | The variable is set and non-empty (default) — or, with `.equals(value)`, equals `value` exactly |
+| DNS | `Preflight::dns(name, "host")` | 500 ms | The host resolves to at least one A or AAAA record. `host` is a bare DNS name — no port |
+| HTTP¹ | `Preflight::http(name, "url")` | 5 seconds | A `GET url` returns a status in `200..=299` (default) — or in the range/value supplied via `.expect_status(...)` |
+| SSH²  | `Preflight::ssh(name, "dest")` | 10 seconds | An SSH session establishes and the remote command (default `true`, override with `.command("...")`) exits 0 |
+| Custom | `Preflight::custom(name, \|\| async { ... })` | 5 seconds | The async closure resolves to `Ok(())` |
 
-Additional primitives (`dns`, `http`, `ssh`, `custom`) are planned for
-upcoming releases.
+¹ Requires the `http-client` feature. The probe reuses the user's
+`#[rigtest::main(http_client = …)]` configurator when present so a
+passing probe predicts the same client configuration the live tests
+will use. A configurator returning `Err` fails only that probe — other
+probes still run.
+
+² Requires the `ssh-client` feature and a Unix target. Same configurator
+reuse and failure semantics as HTTP, using
+`#[rigtest::main(ssh_client = …)]`.
 
 #### Chained adjustments
 
 `.timeout(d)` overrides the per-probe timeout of the most recently added
-probe. For TCP probes the override controls the connect deadline; for env
+probe. For asynchronous probes (`tcp`, `dns`, `http`, `ssh`, `custom`)
+the override controls the connect/resolve/request/exec deadline; for env
 probes the value is recorded but not observed (the check is synchronous).
 
 `.equals(value)` upgrades the most recently added env probe from "set and
-non-empty" to "equals `value` exactly". It is a no-op on TCP probes.
+non-empty" to "equals `value` exactly". No-op on probes of any other
+kind.
+
+`.expect_status(s)` overrides the acceptable HTTP status of the most
+recently added HTTP probe. Accepts either a single `u16` (`.expect_status(204)`)
+or an inclusive range (`.expect_status(200..=204)`). No-op on probes of
+any other kind.
+
+`.command(s)` overrides the remote command run by the most recently added
+SSH probe. The probe still requires exit status 0; only the command run
+on the remote host changes. No-op on probes of any other kind.
 
 Probe names must be unique within a single `#[preflight]` — a collision
 is reported at coordinator startup before any probe runs.

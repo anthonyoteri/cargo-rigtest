@@ -19,6 +19,7 @@
 //!         .tcp("api", "127.0.0.1:8080")
 //!         .timeout(Duration::from_millis(500))
 //!         .env("home_is_set", "HOME")
+//!         .dns("api_dns", "example.com")
 //! }
 //! ```
 //!
@@ -28,11 +29,103 @@
 //! See `CONTEXT.md` for the canonical vocabulary (probe, primitive,
 //! preflight, coordinator).
 
+use std::fmt;
+use std::future::Future;
+use std::ops::RangeInclusive;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::registry::BoxError;
 
 /// Default timeout applied to every TCP probe unless overridden via
 /// [`Preflight::timeout`].
 pub const DEFAULT_TCP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Default timeout applied to every DNS probe unless overridden via
+/// [`Preflight::timeout`].
+pub const DEFAULT_DNS_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Default timeout applied to every HTTP probe unless overridden via
+/// [`Preflight::timeout`].
+pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default timeout applied to every SSH probe unless overridden via
+/// [`Preflight::timeout`].
+pub const DEFAULT_SSH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default timeout applied to every custom probe unless overridden via
+/// [`Preflight::timeout`].
+pub const DEFAULT_CUSTOM_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default acceptable status range for HTTP probes — every standard
+/// success status (`200..=299`). Override with [`Preflight::expect_status`].
+pub const DEFAULT_HTTP_OK_STATUS: RangeInclusive<u16> = 200..=299;
+
+/// Default remote command run by SSH probes. `true` is portable across
+/// every Unix shell and exits 0; we check the exit status, not the
+/// command's output.
+pub const DEFAULT_SSH_COMMAND: &str = "true";
+
+/// What HTTP status codes count as a passing probe.
+///
+/// Constructed from a single `u16` (exact match) or a `RangeInclusive<u16>`
+/// (any code in the inclusive range) via `Into`. Used as the argument to
+/// [`Preflight::expect_status`].
+///
+/// Variants may be added in future releases. The `#[non_exhaustive]`
+/// attribute prevents external code from constructing this enum directly —
+/// use the `Into` impls.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ExpectStatus {
+    /// The probe passes when the response status equals this code exactly.
+    Exact(u16),
+    /// The probe passes when the response status is contained in this
+    /// inclusive range.
+    Range(RangeInclusive<u16>),
+}
+
+impl ExpectStatus {
+    /// Returns `true` when `status` satisfies this expectation.
+    #[must_use]
+    pub fn matches(&self, status: u16) -> bool {
+        match self {
+            Self::Exact(want) => *want == status,
+            Self::Range(range) => range.contains(&status),
+        }
+    }
+}
+
+impl fmt::Display for ExpectStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exact(s) => write!(f, "{s}"),
+            Self::Range(r) => write!(f, "{}..={}", r.start(), r.end()),
+        }
+    }
+}
+
+impl From<u16> for ExpectStatus {
+    fn from(s: u16) -> Self {
+        Self::Exact(s)
+    }
+}
+
+impl From<RangeInclusive<u16>> for ExpectStatus {
+    fn from(r: RangeInclusive<u16>) -> Self {
+        Self::Range(r)
+    }
+}
+
+/// Async factory stored by a [`ProbeKind::Custom`] probe.
+///
+/// Each invocation produces a fresh future that resolves to `Ok(())` on
+/// success or a boxed error on failure. The factory is kept behind an
+/// `Arc` so [`Probe`] stays cheap to move without forcing the closure to
+/// be `Clone`.
+pub type CustomProbeFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>> + Send + Sync>;
 
 /// The kind of a [`Probe`]. Each variant corresponds to a builder method on
 /// [`Preflight`] (a "primitive" in the project's vocabulary).
@@ -40,7 +133,6 @@ pub const DEFAULT_TCP_TIMEOUT: Duration = Duration::from_secs(1);
 /// Variants may be added in future releases. The `#[non_exhaustive]`
 /// attribute prevents external code from constructing this enum directly —
 /// use [`Preflight`]'s builder methods.
-#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum ProbeKind {
     /// A TCP connect probe — passes when a TCP connection to `target`
@@ -60,16 +152,86 @@ pub enum ProbeKind {
         /// the variable is set and its value is non-empty.
         expected: Option<&'static str>,
     },
+    /// A DNS resolution probe — passes when `host` resolves to at least
+    /// one A or AAAA record within the probe's timeout. The host is a
+    /// bare DNS name with no port (e.g. `"example.com"`); ports are out
+    /// of scope for DNS and belong on [`ProbeKind::Tcp`].
+    Dns {
+        /// Hostname to resolve, e.g. `"example.com"`.
+        host: &'static str,
+    },
+    /// An HTTP GET probe — passes when the response status satisfies
+    /// [`expect`] (default: `200..=299`). Reuses the user's registered
+    /// `#[rigtest::main(http_client = …)]` configurator when present so a
+    /// passing probe predicts that real tests can talk to the endpoint.
+    ///
+    /// [`expect`]: ProbeKind::Http::expect
+    #[cfg(feature = "http-client")]
+    Http {
+        /// Fully qualified URL, e.g. `"https://example.com/health"`.
+        url: &'static str,
+        /// Status codes that count as a passing probe.
+        expect: ExpectStatus,
+    },
+    /// An SSH connect-and-exec probe — passes when a session to `dest`
+    /// is established and the remote `command` exits 0. Reuses the
+    /// user's registered `#[rigtest::main(ssh_client = …)]` configurator
+    /// when present.
+    #[cfg(all(feature = "ssh-client", unix))]
+    Ssh {
+        /// SSH destination string, e.g. `"deploy@bastion"`. Any value
+        /// accepted by the `ssh` binary works.
+        dest: &'static str,
+        /// Remote command to execute. Defaults to
+        /// [`DEFAULT_SSH_COMMAND`] (`"true"`); override with
+        /// [`Preflight::command`].
+        command: &'static str,
+    },
+    /// A user-supplied probe — the escape hatch for checks the named
+    /// primitives don't cover. Passes when the closure's returned future
+    /// resolves to `Ok(())`.
+    Custom {
+        /// The async factory. See [`CustomProbeFn`].
+        run: CustomProbeFn,
+    },
+}
+
+impl fmt::Debug for ProbeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp { target } => f.debug_struct("Tcp").field("target", target).finish(),
+            Self::Env { var, expected } => f
+                .debug_struct("Env")
+                .field("var", var)
+                .field("expected", expected)
+                .finish(),
+            Self::Dns { host } => f.debug_struct("Dns").field("host", host).finish(),
+            #[cfg(feature = "http-client")]
+            Self::Http { url, expect } => f
+                .debug_struct("Http")
+                .field("url", url)
+                .field("expect", expect)
+                .finish(),
+            #[cfg(all(feature = "ssh-client", unix))]
+            Self::Ssh { dest, command } => f
+                .debug_struct("Ssh")
+                .field("dest", dest)
+                .field("command", command)
+                .finish(),
+            Self::Custom { .. } => f.debug_struct("Custom").finish_non_exhaustive(),
+        }
+    }
 }
 
 /// A single declared check. Carries the display name, the kind-specific
-/// configuration, and a per-probe timeout (currently observed by TCP
-/// probes; environment probes evaluate synchronously and ignore it).
+/// configuration, and a per-probe timeout (currently observed by every
+/// asynchronous primitive; environment probes evaluate synchronously and
+/// ignore it).
 ///
 /// Fields may be added in future releases. The `#[non_exhaustive]`
 /// attribute prevents external code from constructing this struct via
 /// struct-literal syntax — use [`Preflight`]'s builder methods.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct Probe {
     /// Display name, as it appears in the readiness output and in
@@ -77,20 +239,22 @@ pub struct Probe {
     pub name: &'static str,
     /// Kind-specific configuration. See [`ProbeKind`].
     pub kind: ProbeKind,
-    /// Per-probe timeout. TCP probes default to
-    /// [`DEFAULT_TCP_TIMEOUT`]; environment probes carry the same default
-    /// for diagnostic uniformity but evaluate synchronously and so never
-    /// observe it.
+    /// Per-probe timeout. Each primitive carries its own sensible default;
+    /// environment probes carry one for diagnostic uniformity but evaluate
+    /// synchronously and so never observe it.
     pub timeout: Duration,
 }
 
 /// Builder for a list of [`Probe`]s declared by a `#[preflight]` function.
 ///
-/// Use [`Preflight::new`] to start the chain, then call [`tcp`][Self::tcp]
-/// or [`env`][Self::env] to add probes, optionally followed by
-/// [`timeout`][Self::timeout] / [`equals`][Self::equals] which adjust the
-/// most-recently-added probe. Each method returns `Preflight` so the chain
-/// reads naturally.
+/// Use [`Preflight::new`] to start the chain, then call one of the probe
+/// constructors ([`tcp`][Self::tcp], [`env`][Self::env],
+/// [`dns`][Self::dns], [`http`][Self::http], [`ssh`][Self::ssh],
+/// [`custom`][Self::custom]), optionally followed by an adjustment
+/// ([`timeout`][Self::timeout], [`equals`][Self::equals],
+/// [`expect_status`][Self::expect_status], [`command`][Self::command])
+/// which acts on the most-recently-added probe. Each method returns
+/// `Preflight` so the chain reads naturally.
 ///
 /// Fields may be added in future releases. The `#[non_exhaustive]`
 /// attribute prevents external code from constructing this struct via
@@ -141,6 +305,112 @@ impl Preflight {
         self
     }
 
+    /// Adds a DNS resolution probe.
+    ///
+    /// `host` is a bare DNS name with **no port** (for example
+    /// `"example.com"`). The probe passes when the name resolves to at
+    /// least one A or AAAA record within the probe's timeout. The default
+    /// timeout is [`DEFAULT_DNS_TIMEOUT`] (500 ms); override per-probe
+    /// with [`timeout`][Self::timeout].
+    pub fn dns(mut self, name: &'static str, host: &'static str) -> Self {
+        self.probes.push(Probe {
+            name,
+            kind: ProbeKind::Dns { host },
+            timeout: DEFAULT_DNS_TIMEOUT,
+        });
+        self
+    }
+
+    /// Adds an HTTP GET probe.
+    ///
+    /// The probe passes when a `GET url` returns a status in
+    /// [`DEFAULT_HTTP_OK_STATUS`] (`200..=299`). Override the acceptable
+    /// status with [`expect_status`][Self::expect_status], and the
+    /// timeout (default [`DEFAULT_HTTP_TIMEOUT`], 5 s) with
+    /// [`timeout`][Self::timeout].
+    ///
+    /// If the suite registers an HTTP configurator via
+    /// `#[rigtest::main(http_client = …)]`, the probe applies it to a
+    /// fresh [`reqwest::ClientBuilder`] so it talks to the endpoint the
+    /// same way real tests will. A configurator that returns `Err` causes
+    /// the probe to fail with the configurator's error attached; other
+    /// probes still run.
+    #[cfg(feature = "http-client")]
+    pub fn http(mut self, name: &'static str, url: &'static str) -> Self {
+        self.probes.push(Probe {
+            name,
+            kind: ProbeKind::Http {
+                url,
+                expect: ExpectStatus::Range(DEFAULT_HTTP_OK_STATUS),
+            },
+            timeout: DEFAULT_HTTP_TIMEOUT,
+        });
+        self
+    }
+
+    /// Adds an SSH connect-and-exec probe.
+    ///
+    /// `dest` is any value accepted by the `ssh` binary — for example
+    /// `"user@host"`, `"host"`, or a `~/.ssh/config` alias. The probe
+    /// passes when a session establishes and the remote command (default
+    /// [`DEFAULT_SSH_COMMAND`], `"true"`) exits 0. Override the command
+    /// with [`command`][Self::command] and the timeout (default
+    /// [`DEFAULT_SSH_TIMEOUT`], 10 s) with [`timeout`][Self::timeout].
+    ///
+    /// If the suite registers an SSH configurator via
+    /// `#[rigtest::main(ssh_client = …)]`, the probe applies it to a
+    /// fresh [`openssh::SessionBuilder`]. A configurator that returns
+    /// `Err` causes the probe to fail with the configurator's error
+    /// attached; other probes still run.
+    ///
+    /// # Platform support
+    ///
+    /// Available only on Unix; [`openssh`] is a Unix-only dependency.
+    #[cfg(all(feature = "ssh-client", unix))]
+    pub fn ssh(mut self, name: &'static str, dest: &'static str) -> Self {
+        self.probes.push(Probe {
+            name,
+            kind: ProbeKind::Ssh {
+                dest,
+                command: DEFAULT_SSH_COMMAND,
+            },
+            timeout: DEFAULT_SSH_TIMEOUT,
+        });
+        self
+    }
+
+    /// Adds a user-supplied probe — the escape hatch for checks the
+    /// six named primitives don't cover.
+    ///
+    /// `factory` is invoked once when the probe runs and must return a
+    /// `Send` future that resolves to `Ok(())` on success or to an error
+    /// on failure. The default timeout is [`DEFAULT_CUSTOM_TIMEOUT`]
+    /// (5 s); override with [`timeout`][Self::timeout].
+    ///
+    /// ```ignore
+    /// use rigtest::Preflight;
+    /// Preflight::new().custom("mx_record", || async move {
+    ///     // … any async check …
+    ///     Ok(())
+    /// });
+    /// ```
+    pub fn custom<F, Fut>(mut self, name: &'static str, factory: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
+    {
+        let run: CustomProbeFn = Arc::new(move || {
+            let fut = factory();
+            Box::pin(fut) as Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>
+        });
+        self.probes.push(Probe {
+            name,
+            kind: ProbeKind::Custom { run },
+            timeout: DEFAULT_CUSTOM_TIMEOUT,
+        });
+        self
+    }
+
     /// Overrides the timeout of the most recently added probe.
     ///
     /// Has no effect when no probe has been added yet, and no effect on
@@ -161,6 +431,34 @@ impl Preflight {
         if let Some(last) = self.probes.last_mut() {
             if let ProbeKind::Env { expected, .. } = &mut last.kind {
                 *expected = Some(value);
+            }
+        }
+        self
+    }
+
+    /// Overrides the acceptable response status of the most recently
+    /// added HTTP probe. Accepts a single status (`200`) or an inclusive
+    /// range (`200..=204`); the impl uses `Into<ExpectStatus>`. Has no
+    /// effect when the most recent probe is not an HTTP probe.
+    #[cfg(feature = "http-client")]
+    pub fn expect_status<S: Into<ExpectStatus>>(mut self, status: S) -> Self {
+        if let Some(last) = self.probes.last_mut() {
+            if let ProbeKind::Http { expect, .. } = &mut last.kind {
+                *expect = status.into();
+            }
+        }
+        self
+    }
+
+    /// Overrides the remote command of the most recently added SSH
+    /// probe. The probe still requires exit status 0; only the command
+    /// run on the remote host changes. Has no effect when the most
+    /// recent probe is not an SSH probe.
+    #[cfg(all(feature = "ssh-client", unix))]
+    pub fn command(mut self, command: &'static str) -> Self {
+        if let Some(last) = self.probes.last_mut() {
+            if let ProbeKind::Ssh { command: c, .. } = &mut last.kind {
+                *c = command;
             }
         }
         self
@@ -227,7 +525,7 @@ mod tests {
                 assert_eq!(var, "HOME");
                 assert!(expected.is_none());
             }
-            ProbeKind::Tcp { .. } => panic!("expected env probe"),
+            _ => panic!("expected env probe"),
         }
     }
 
@@ -236,7 +534,7 @@ mod tests {
         let p = Preflight::new().env("mode", "MODE").equals("prod");
         match p.probes()[0].kind {
             ProbeKind::Env { expected, .. } => assert_eq!(expected, Some("prod")),
-            ProbeKind::Tcp { .. } => panic!("expected env probe"),
+            _ => panic!("expected env probe"),
         }
     }
 
@@ -266,5 +564,153 @@ mod tests {
             .tcp("b", "1.2.3.4:2");
         assert_eq!(p.probes()[0].timeout, Duration::from_millis(100));
         assert_eq!(p.probes()[1].timeout, DEFAULT_TCP_TIMEOUT);
+    }
+
+    #[test]
+    fn dns_probe_records_default_timeout() {
+        let p = Preflight::new().dns("api_dns", "example.com");
+        let probes = p.probes();
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].name, "api_dns");
+        assert!(matches!(
+            probes[0].kind,
+            ProbeKind::Dns {
+                host: "example.com"
+            }
+        ));
+        assert_eq!(probes[0].timeout, DEFAULT_DNS_TIMEOUT);
+    }
+
+    #[test]
+    fn each_primitive_carries_its_documented_default_timeout() {
+        // A regression guard for the documented defaults — every named
+        // primitive must use the constant that the README references.
+        let mut p = Preflight::new()
+            .tcp("tcp", "1.2.3.4:1")
+            .env("env", "X")
+            .dns("dns", "example.com");
+        assert_eq!(p.probes()[0].timeout, DEFAULT_TCP_TIMEOUT);
+        assert_eq!(p.probes()[2].timeout, DEFAULT_DNS_TIMEOUT);
+        p = p.custom("custom", || async { Ok(()) });
+        assert_eq!(p.probes()[3].timeout, DEFAULT_CUSTOM_TIMEOUT);
+
+        #[cfg(feature = "http-client")]
+        {
+            let p = p.http("http", "http://example.com/");
+            assert_eq!(p.probes()[4].timeout, DEFAULT_HTTP_TIMEOUT);
+
+            #[cfg(all(feature = "ssh-client", unix))]
+            {
+                let p = p.ssh("ssh", "deploy@bastion");
+                assert_eq!(p.probes()[5].timeout, DEFAULT_SSH_TIMEOUT);
+            }
+        }
+    }
+
+    #[test]
+    fn custom_probe_records_default_timeout() {
+        let p = Preflight::new().custom("noop", || async { Ok(()) });
+        let probes = p.probes();
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].name, "noop");
+        assert!(matches!(probes[0].kind, ProbeKind::Custom { .. }));
+        assert_eq!(probes[0].timeout, DEFAULT_CUSTOM_TIMEOUT);
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn http_probe_defaults_to_2xx_range() {
+        let p = Preflight::new().http("api", "https://example.com/health");
+        match &p.probes()[0].kind {
+            ProbeKind::Http { url, expect } => {
+                assert_eq!(*url, "https://example.com/health");
+                assert!(matches!(expect, ExpectStatus::Range(r) if *r == (200..=299)));
+            }
+            _ => panic!("expected http probe"),
+        }
+        assert_eq!(p.probes()[0].timeout, DEFAULT_HTTP_TIMEOUT);
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn expect_status_accepts_single_code() {
+        let p = Preflight::new()
+            .http("api", "https://example.com/health")
+            .expect_status(204_u16);
+        match &p.probes()[0].kind {
+            ProbeKind::Http { expect, .. } => {
+                assert!(matches!(expect, ExpectStatus::Exact(204)));
+            }
+            _ => panic!("expected http probe"),
+        }
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn expect_status_accepts_inclusive_range() {
+        let p = Preflight::new()
+            .http("api", "https://example.com/health")
+            .expect_status(200_u16..=204);
+        match &p.probes()[0].kind {
+            ProbeKind::Http { expect, .. } => {
+                assert!(matches!(expect, ExpectStatus::Range(r) if *r == (200..=204)));
+            }
+            _ => panic!("expected http probe"),
+        }
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn expect_status_on_non_http_probe_is_no_op() {
+        let p = Preflight::new()
+            .tcp("api", "127.0.0.1:1")
+            .expect_status(200_u16);
+        assert!(matches!(p.probes()[0].kind, ProbeKind::Tcp { .. }));
+    }
+
+    #[test]
+    fn expect_status_matches_exact_and_range() {
+        let exact: ExpectStatus = 204_u16.into();
+        assert!(exact.matches(204));
+        assert!(!exact.matches(205));
+        let range: ExpectStatus = (200_u16..=204).into();
+        assert!(range.matches(200));
+        assert!(range.matches(204));
+        assert!(!range.matches(205));
+    }
+
+    #[cfg(all(feature = "ssh-client", unix))]
+    #[test]
+    fn ssh_probe_records_default_command_and_timeout() {
+        let p = Preflight::new().ssh("bastion", "deploy@bastion");
+        match &p.probes()[0].kind {
+            ProbeKind::Ssh { dest, command } => {
+                assert_eq!(*dest, "deploy@bastion");
+                assert_eq!(*command, DEFAULT_SSH_COMMAND);
+            }
+            _ => panic!("expected ssh probe"),
+        }
+        assert_eq!(p.probes()[0].timeout, DEFAULT_SSH_TIMEOUT);
+    }
+
+    #[cfg(all(feature = "ssh-client", unix))]
+    #[test]
+    fn command_overrides_last_ssh_probe() {
+        let p = Preflight::new()
+            .ssh("bastion", "deploy@bastion")
+            .command("uname -s");
+        match &p.probes()[0].kind {
+            ProbeKind::Ssh { command, .. } => assert_eq!(*command, "uname -s"),
+            _ => panic!("expected ssh probe"),
+        }
+    }
+
+    #[cfg(all(feature = "ssh-client", unix))]
+    #[test]
+    fn command_on_non_ssh_probe_is_no_op() {
+        let p = Preflight::new()
+            .tcp("api", "127.0.0.1:1")
+            .command("uname -s");
+        assert!(matches!(p.probes()[0].kind, ProbeKind::Tcp { .. }));
     }
 }
