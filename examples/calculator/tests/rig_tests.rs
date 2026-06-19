@@ -3,6 +3,24 @@ use std::sync::Arc;
 use rigtest::prelude::*;
 use serde::{Deserialize, Serialize};
 
+// A preflight that verifies the suite is launched the way it expects. We
+// pair an env probe (with `.equals(...)` to demonstrate value pinning)
+// against `CARGO_RIGTEST=1`, which the `cargo rigtest` CLI sets before
+// spawning the test binary, with a free env probe for `PATH`.
+//
+// A real-world preflight would typically include a `tcp` probe against a
+// staging endpoint. We do not include one here because the calculator
+// suite has no live infrastructure to talk to; pass `--no-preflight` to
+// `cargo rigtest run` if you ever need to skip preflight for local
+// debugging.
+#[preflight]
+fn checks() -> Preflight {
+    Preflight::new()
+        .env("path_is_set", "PATH")
+        .env("invoked_by_cargo_rigtest", "CARGO_RIGTEST")
+        .equals("1")
+}
+
 #[derive(Serialize, Deserialize)]
 struct State {
     max_operand: i64,

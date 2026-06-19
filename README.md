@@ -24,6 +24,7 @@ the rest of your code.
 | Parametrized cases (`#[case]`)   |     —      |       —       |       ✓       |
 | Global setup / teardown          |     —      |       —       |       ✓       |
 | Per-test setup / teardown        |     —      |       —       |       ✓       |
+| Preflight environment checks     |     —      |       —       |       ✓       |
 | JUnit XML reporter               |     —      |      ✓¹       |       ✓       |
 | Built-in HTTP client             |     —      |       —       |       ✓       |
 | Built-in SSH client              |     —      |       —       |       ✓       |

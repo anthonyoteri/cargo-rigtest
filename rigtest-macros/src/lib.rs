@@ -11,7 +11,9 @@ use syn::Expr;
 use syn::FnArg;
 use syn::ItemFn;
 use syn::Pat;
+use syn::ReturnType;
 use syn::Token;
+use syn::Type;
 
 /// Marks a `fn main()` as the entry point for a cargo-rigtest test binary.
 ///
@@ -784,4 +786,130 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// Registers a function as the suite-wide preflight check.
+///
+/// The annotated function runs once in the coordinator before
+/// `#[global_setup]` and before any test subprocess is spawned. It declares
+/// the external dependencies the suite needs — TCP endpoints and
+/// environment variables — by building a `rigtest::Preflight` value and
+/// returning it.
+///
+/// At most one `#[preflight]` may be defined per test binary. If any
+/// declared probe fails, the coordinator prints a readiness table, exits
+/// with status `2`, and skips both `#[global_setup]` and `#[global_teardown]`.
+///
+/// # Signature
+///
+/// `#[preflight]` accepts the signature:
+///
+/// ```text
+/// fn name() -> Preflight { ... }
+/// ```
+///
+/// `async fn`, additional parameters, and return types other than
+/// `Preflight` are rejected at compile time with an actionable message.
+///
+/// # Example
+///
+/// ```ignore
+/// use rigtest::Preflight;
+/// use std::time::Duration;
+///
+/// #[rigtest::preflight]
+/// fn preflight() -> Preflight {
+///     Preflight::new()
+///         .tcp("api", "127.0.0.1:8080")
+///         .timeout(Duration::from_millis(500))
+///         .env("home_set", "HOME")
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn preflight(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match expand_preflight(attr, item) {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_preflight(attr: TokenStream, item: TokenStream) -> Result<TokenStream, syn::Error> {
+    let attr2: proc_macro2::TokenStream = attr.into();
+    if !attr2.is_empty() {
+        return Err(syn::Error::new_spanned(
+            attr2,
+            "#[preflight] does not accept any arguments",
+        ));
+    }
+
+    let func: ItemFn = syn::parse(item)?;
+
+    if func.sig.asyncness.is_some() {
+        return Err(syn::Error::new_spanned(
+            func.sig.asyncness,
+            "#[preflight] functions must be synchronous (the framework runs probes; the \
+             builder function only constructs the Preflight description)",
+        ));
+    }
+
+    if !func.sig.inputs.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &func.sig.inputs,
+            "#[preflight] functions must take no arguments",
+        ));
+    }
+
+    // Insist on an explicit `-> Preflight` return type. We deliberately
+    // match by trailing path segment so both `Preflight` and the fully
+    // qualified `rigtest::Preflight` are accepted; this is consistent
+    // with `#[global_setup]`/`#[global_teardown]`, which surface the
+    // return type's tokens verbatim.
+    let return_ty = match &func.sig.output {
+        ReturnType::Default => {
+            return Err(syn::Error::new_spanned(
+                &func.sig,
+                "#[preflight] functions must return `Preflight`",
+            ));
+        }
+        ReturnType::Type(_, ty) => ty.as_ref(),
+    };
+    if !return_type_is_preflight(return_ty) {
+        return Err(syn::Error::new_spanned(
+            return_ty,
+            "#[preflight] functions must return `Preflight`",
+        ));
+    }
+
+    let func_ident = &func.sig.ident;
+    let static_ident = syn::Ident::new(
+        &format!(
+            "__RIGTEST_PREFLIGHT_{}",
+            func_ident.to_string().to_uppercase()
+        ),
+        Span::call_site(),
+    );
+
+    let expanded = quote! {
+        #func
+
+        #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_PREFLIGHT)]
+        #[linkme(crate = ::rigtest::__linkme)]
+        static #static_ident: ::rigtest::registry::PreflightEntry =
+            ::rigtest::registry::PreflightEntry::new(#func_ident);
+    };
+    Ok(TokenStream::from(expanded))
+}
+
+/// Returns true when `ty` is `Preflight` or a path ending in `::Preflight`.
+fn return_type_is_preflight(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    if tp.qself.is_some() {
+        return false;
+    }
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "Preflight")
 }

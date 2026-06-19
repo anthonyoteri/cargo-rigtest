@@ -72,6 +72,7 @@ cargo rigtest run [OPTIONS]
 | `--test <NAME>` | Only run the named test target (repeatable: `--test a --test b`) |
 | `--package <NAME>` | Package containing the test targets |
 | `--no-capture` | Print test output in real time instead of capturing it (implies `--jobs 1`) |
+| `--no-preflight` | Skip the preflight phase entirely (see [Preflight](#preflight)) |
 | `--reporter <KIND>` | Additional reporter to run alongside the console. `junit` emits `target/rigtest/junit.xml` (see [JUnit XML output](#junit-xml-output)) |
 
 The seed is printed at the start of every run so a failing order can be
@@ -142,6 +143,40 @@ the name filter, match at least one `--tag` (when any are given), and
 match none of the `--not-tag` values. If nothing matches, the run exits
 cleanly with a zero-result summary — the same behaviour as a `--filter`
 that matches no tests.
+
+---
+
+## Preflight
+
+A test binary can declare a `#[preflight]` function that runs once in the
+coordinator, before `#[global_setup]` and before any test subprocess is
+spawned, to verify the suite's declared external dependencies. See the
+[`rigtest`](https://crates.io/crates/rigtest) crate for the macro and the
+builder API.
+
+If any declared probe fails, the readiness table is printed and the
+coordinator aborts the suite **before** `#[global_setup]` runs — neither
+setup nor teardown executes when preflight fails, so an unprepared
+environment cannot leave half-initialised state behind.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | All tests passed (or no tests matched the filter) |
+| `1` | At least one test failed |
+| `2` | The preflight phase aborted the suite (one or more probes failed). Distinct from `1` so CI can distinguish "the environment isn't ready" from "the tests genuinely failed". |
+
+### Skipping preflight
+
+Pass `--no-preflight` to skip the phase entirely for one run:
+
+```
+cargo rigtest run --no-preflight
+```
+
+This is intended for local debugging, not CI: preflight exists
+specifically to catch missing environment dependencies *before* tests run.
 
 ---
 

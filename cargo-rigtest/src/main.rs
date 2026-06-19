@@ -83,6 +83,11 @@ struct RunArgs {
     /// `target/rigtest/junit.xml` alongside the live console output.
     #[arg(long, value_enum, value_name = "REPORTER")]
     reporter: Option<ReporterKind>,
+
+    /// Skip the preflight phase entirely. Use sparingly — preflight exists
+    /// to catch missing environment dependencies *before* tests run.
+    #[arg(long)]
+    no_preflight: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -200,6 +205,9 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         }
         if args.no_capture {
             test_cmd.arg("--no-capture");
+        }
+        if args.no_preflight {
+            test_cmd.arg("--no-preflight");
         }
         if let Some(paths) = &junit {
             test_cmd.args(["--reporter", "junit"]);

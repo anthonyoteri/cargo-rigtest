@@ -14,7 +14,7 @@ rust-version = "1.87"
 [workspace.dependencies]
 rigtest-macros = { version = "0.4", path = "rigtest-macros" }
 libc = "0.2"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "process", "time", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "process", "time", "io-util", "macros", "net"] }
 linkme = "0.3"
 clap = { version = "4", features = ["derive"] }
 rand = "0.10"

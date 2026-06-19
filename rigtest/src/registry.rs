@@ -184,12 +184,50 @@ impl GlobalTeardownEntry {
 
 unsafe impl Sync for GlobalTeardownEntry {}
 
+/// A preflight builder function registered at compile time via `#[preflight]`.
+///
+/// At most one entry may exist per test binary. The coordinator calls
+/// [`build_fn`] once at startup — before any `#[global_setup]` runs — to
+/// obtain the declared [`Preflight`][crate::preflight::Preflight] and runs
+/// every probe in parallel.
+///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — use the `#[preflight]` macro.
+///
+/// [`build_fn`]: PreflightEntry::build_fn
+#[non_exhaustive]
+pub struct PreflightEntry {
+    /// Calls the user's `#[preflight]` function and returns the declared
+    /// [`Preflight`][crate::preflight::Preflight].
+    pub build_fn: fn() -> crate::preflight::Preflight,
+}
+
+impl PreflightEntry {
+    /// Constructs a [`PreflightEntry`]. Intended for use by the
+    /// `#[preflight]` proc macro; not part of the stable public API.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(build_fn: fn() -> crate::preflight::Preflight) -> Self {
+        Self { build_fn }
+    }
+}
+
+unsafe impl Sync for PreflightEntry {}
+
 /// All test cases discovered at compile time via `#[testcase]`.
 ///
 /// Populated by [`linkme`] distributed slices; the coordinator iterates this
 /// slice to build the list of tests to run.
 #[linkme::distributed_slice]
 pub static RIG_TEST_CASES: [TestCase];
+
+/// At most one preflight entry, registered via `#[preflight]`.
+///
+/// The runtime asserts at startup that this slice contains zero or one
+/// element.
+#[linkme::distributed_slice]
+pub static RIG_PREFLIGHT: [PreflightEntry];
 
 /// At most one global setup entry, registered via `#[global_setup]`.
 ///

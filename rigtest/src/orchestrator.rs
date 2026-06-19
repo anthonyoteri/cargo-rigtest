@@ -9,13 +9,28 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::junit::{JunitConfig, JunitReporter};
+use crate::preflight_runner::run_preflight;
 use crate::protocol::SubprocessOutcome;
-use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_TEST_CASES};
+use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_PREFLIGHT, RIG_TEST_CASES};
 use crate::reporter::{
     MultiReporter, Outcome as ReportOutcome, Reporter, TestEventReporter, TestRef,
 };
 use crate::scheduler::RuntimeArgs;
 use crate::subprocess::{OsSubprocessRunner, SpawnRequest, SubprocessRunner};
+
+/// Sentinel error returned by [`run`] when the preflight phase aborts the
+/// suite. `run_main` downcasts this to translate the abort into exit code
+/// `2` (distinct from the `1` used for test failures).
+#[derive(Debug)]
+pub(crate) struct PreflightAbort(pub String);
+
+impl std::fmt::Display for PreflightAbort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PreflightAbort {}
 
 fn classify_failed(stderr: &str) -> ReportOutcome {
     if stderr.contains("panicked at") {
@@ -363,6 +378,11 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
 /// is registered.
 pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     assert!(
+        RIG_PREFLIGHT.len() <= 1,
+        "cargo-rigtest: at most one #[preflight] function may be defined, found {}",
+        RIG_PREFLIGHT.len()
+    );
+    assert!(
         RIG_GLOBAL_SETUP.len() <= 1,
         "cargo-rigtest: at most one #[global_setup] function may be defined, found {}",
         RIG_GLOBAL_SETUP.len()
@@ -389,6 +409,17 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     let seed = args.seed.unwrap_or_else(|| rng.random::<u64>());
 
     let reporter = Arc::new(build_reporter(&args, seed)?);
+
+    // Preflight runs before global_setup. If --no-preflight is set or no
+    // #[preflight] is declared this is a no-op. On failure the function
+    // returns an error and we wrap it in `PreflightAbort` so run_main can
+    // translate the suite-level exit code into 2.
+    if !args.no_preflight {
+        let tests_total = RIG_TEST_CASES.len();
+        if let Err(e) = run_preflight(tests_total).await {
+            return Err(anyhow::Error::new(PreflightAbort(e.to_string())));
+        }
+    }
 
     let global_setup = RIG_GLOBAL_SETUP.first();
 
