@@ -62,5 +62,25 @@ async fn builds_http_request(
     Ok(())
 }
 
+// A parametrized testcase. Each `#[case(...)]` row is registered as its
+// own test (`role_is_recognised::case_1`, `::case_2_viewer`, `::case_3`)
+// and is reported and filterable independently.
+#[testcase]
+#[case("alice", "admin")]
+#[case::viewer("bob", "viewer")]
+#[case("carol", "admin")]
+async fn role_is_recognised(
+    _ctx: Arc<TestContext>,
+    #[case] user: &str,
+    #[case] expected_role: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    assert!(!user.is_empty(), "user name should not be empty");
+    assert!(
+        matches!(expected_role, "admin" | "viewer"),
+        "unexpected role: {expected_role}",
+    );
+    Ok(())
+}
+
 #[rigtest::main]
 fn main() {}
