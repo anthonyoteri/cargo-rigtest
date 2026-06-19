@@ -22,6 +22,17 @@ pub struct RuntimeArgs {
     #[arg(short, long)]
     pub filter: Option<String>,
 
+    /// Only run tests tagged with one of TAGS. Repeat the flag and/or pass a
+    /// comma-separated list — both forms union together. Combined with
+    /// `--not-tag` and `--filter` using AND.
+    #[arg(long = "tag", value_name = "TAGS", value_delimiter = ',', action = clap::ArgAction::Append)]
+    pub tag: Vec<String>,
+
+    /// Exclude tests tagged with any of TAGS. Repeat the flag and/or pass a
+    /// comma-separated list — both forms union together.
+    #[arg(long = "not-tag", value_name = "TAGS", value_delimiter = ',', action = clap::ArgAction::Append)]
+    pub not_tag: Vec<String>,
+
     /// Show test output in real time rather than capturing it.
     #[arg(long)]
     pub no_capture: bool,

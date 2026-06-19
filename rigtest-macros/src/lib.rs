@@ -173,6 +173,7 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// | `serial` | Prevents concurrent execution with any other test. |
 /// | `timeout = <Duration>` | Kills and fails the test if it exceeds the given duration. |
 /// | `retries = <N>` | Retries a failed test up to `N` additional times before reporting failure. |
+/// | `tags = ["a", "b"]` | Attaches one or more string tags for use with the `--tag` and `--not-tag` CLI filters. |
 ///
 /// # Examples
 ///
@@ -223,6 +224,7 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut serial = false;
     let mut timeout_tokens = quote! { None };
     let mut retries_tokens = quote! { 0u32 };
+    let mut tags_tokens = quote! { &[] as &'static [&'static str] };
 
     for meta in &metas {
         match meta {
@@ -237,6 +239,10 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let val = &nv.value;
                 retries_tokens = quote! { #val };
             }
+            syn::Meta::NameValue(nv) if nv.path.is_ident("tags") => match parse_tags(&nv.value) {
+                Ok(tokens) => tags_tokens = tokens,
+                Err(e) => return e.to_compile_error().into(),
+            },
             _ => {}
         }
     }
@@ -263,11 +269,61 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #serial,
                 #timeout_tokens,
                 #retries_tokens,
+                #tags_tokens,
                 |ctx| ::std::boxed::Box::pin(async move { #func_ident(ctx).await }),
             );
     };
 
     TokenStream::from(expanded)
+}
+
+/// Parse the value of `tags = [...]` into a token stream that produces a
+/// `&'static [&'static str]`.
+///
+/// Accepts an array literal of string literals. Each tag must be a non-empty
+/// string with no whitespace — both are runner-side concerns surfaced as a
+/// compile error so a typo in a tag does not silently match nothing at
+/// runtime.
+fn parse_tags(value: &syn::Expr) -> syn::Result<proc_macro2::TokenStream> {
+    let syn::Expr::Array(array) = value else {
+        return Err(syn::Error::new_spanned(
+            value,
+            "`tags` must be an array literal of string literals, e.g. tags = [\"smoke\", \"regression\"]",
+        ));
+    };
+
+    let mut literals: Vec<syn::LitStr> = Vec::with_capacity(array.elems.len());
+    for elem in &array.elems {
+        let lit = match elem {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) => s.clone(),
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "`tags` entries must be string literals, e.g. \"smoke\"",
+                ));
+            }
+        };
+
+        let value = lit.value();
+        if value.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &lit,
+                "`tags` entries must not be empty",
+            ));
+        }
+        if value.chars().any(char::is_whitespace) {
+            return Err(syn::Error::new_spanned(
+                &lit,
+                "`tags` entries must not contain whitespace",
+            ));
+        }
+        literals.push(lit);
+    }
+
+    Ok(quote! { &[ #( #literals ),* ] as &'static [&'static str] })
 }
 
 /// Registers an async function as the global setup hook for a test binary.

@@ -18,7 +18,7 @@ async fn setup() -> State {
 #[global_teardown]
 async fn teardown(_state: State) {}
 
-#[testcase]
+#[testcase(tags = ["smoke"])]
 async fn add_positive_numbers(
     _ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -27,7 +27,7 @@ async fn add_positive_numbers(
     Ok(())
 }
 
-#[testcase]
+#[testcase(tags = ["smoke", "regression"])]
 async fn add_negative_numbers(
     _ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

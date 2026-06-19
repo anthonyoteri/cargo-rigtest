@@ -111,6 +111,7 @@
 //! | `serial` | Run this test exclusively — no other test runs concurrently |
 //! | `timeout = <Duration>` | Terminate the subprocess if it runs too long |
 //! | `retries = <N>` | Retry a failing test up to N additional times |
+//! | `tags = ["smoke", …]` | Attach string tags filterable from the CLI with `--tag` / `--not-tag` |
 //!
 //! ## `#[global_setup]`
 //!
