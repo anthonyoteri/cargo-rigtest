@@ -178,6 +178,62 @@ async fn full_migration_replay(_ctx: Arc<TestContext>) -> Result<(), rigtest::Er
 See the [`cargo-rigtest`](https://crates.io/crates/cargo-rigtest) crate
 for the matching CLI flags and how they compose with `--filter`.
 
+### `#[preflight]`
+
+Runs once in the coordinator, before `#[global_setup]` and before any test
+subprocess is spawned, to verify that the external dependencies the suite
+needs are actually reachable. Each declared probe either **passes** or
+**fails**; if any probe fails the coordinator prints a readiness table,
+exits with status `2`, and skips both `#[global_setup]` and
+`#[global_teardown]`.
+
+At most one `#[preflight]` may be defined per test binary.
+
+```rust
+use rigtest::Preflight;
+use std::time::Duration;
+
+#[rigtest::preflight]
+fn preflight() -> Preflight {
+    Preflight::new()
+        .tcp("api", "127.0.0.1:8080")
+        .timeout(Duration::from_millis(500))
+        .env("home_is_set", "HOME")
+}
+```
+
+In this release `#[preflight]` accepts exactly one signature —
+`fn() -> Preflight`. `async`, additional parameters, and return types other
+than `Preflight` are rejected at compile time. A profile-aware 1-arg form
+is planned for a later release.
+
+#### Probe primitives
+
+| Primitive | Builder method | Default timeout | Passes when |
+|-----------|----------------|-----------------|-------------|
+| TCP | `Preflight::tcp(name, "host:port")` | 1 second | A TCP connection to the target establishes within the timeout |
+| Env | `Preflight::env(name, "VAR")` | n/a (synchronous) | The variable is set and non-empty (default) — or, with `.equals(value)`, equals `value` exactly |
+
+Additional primitives (`dns`, `http`, `ssh`, `custom`) are planned for
+upcoming releases.
+
+#### Chained adjustments
+
+`.timeout(d)` overrides the per-probe timeout of the most recently added
+probe. For TCP probes the override controls the connect deadline; for env
+probes the value is recorded but not observed (the check is synchronous).
+
+`.equals(value)` upgrades the most recently added env probe from "set and
+non-empty" to "equals `value` exactly". It is a no-op on TCP probes.
+
+Probe names must be unique within a single `#[preflight]` — a collision
+is reported at coordinator startup before any probe runs.
+
+> **Skipping preflight.** Pass `--no-preflight` to `cargo rigtest run` to
+> skip the entire phase for one run. This is intended for local debugging,
+> not CI: preflight exists specifically to catch missing environment
+> dependencies *before* tests run.
+
 ### `#[global_setup]`
 
 Runs once before any test in the suite. The return value is serialized and

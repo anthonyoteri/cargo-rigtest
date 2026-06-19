@@ -1,6 +1,14 @@
-use rigtest::{global_setup, global_teardown, testcase, TestContext};
+use rigtest::{global_setup, global_teardown, preflight, testcase, Preflight, TestContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+// A preflight that verifies the environment carries the basics every
+// shell-launched test depends on. `HOME` is set in every supported CI
+// environment, so this probe passes deterministically.
+#[preflight]
+fn checks() -> Preflight {
+    Preflight::new().env("home_is_set", "HOME")
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct SharedState {

@@ -255,6 +255,8 @@ pub extern crate serde_json as __serde_json;
 pub mod context;
 pub(crate) mod junit;
 pub(crate) mod orchestrator;
+pub mod preflight;
+pub(crate) mod preflight_runner;
 pub(crate) mod protocol;
 #[doc(hidden)]
 pub mod registry;
@@ -266,9 +268,10 @@ pub(crate) mod subprocess;
 pub use context::TestContext;
 #[cfg(all(feature = "ssh-client", unix))]
 pub use openssh;
+pub use preflight::Preflight;
 #[cfg(feature = "http-client")]
 pub use reqwest;
-pub use rigtest_macros::{global_setup, global_teardown, main, testcase};
+pub use rigtest_macros::{global_setup, global_teardown, main, preflight, testcase};
 
 /// Convenient glob import for test files.
 ///
@@ -279,8 +282,9 @@ pub use rigtest_macros::{global_setup, global_teardown, main, testcase};
 /// Brings into scope: [`TestContext`] and the attribute macros [`testcase`],
 /// [`global_setup`], [`global_teardown`], and [`main`].
 pub mod prelude {
+    pub use crate::preflight::Preflight;
     pub use crate::TestContext;
-    pub use rigtest_macros::{global_setup, global_teardown, main, testcase};
+    pub use rigtest_macros::{global_setup, global_teardown, main, preflight, testcase};
 }
 
 /// Convenience alias for the error type used by test functions, setup, and
@@ -466,8 +470,11 @@ pub fn run_main() -> ! {
     match result {
         Ok(()) => flush_and_exit(0),
         Err(e) => {
+            // A preflight abort exits with status 2 so CI can distinguish
+            // "environment isn't ready" from "tests genuinely failed".
+            let is_preflight = e.downcast_ref::<orchestrator::PreflightAbort>().is_some();
             eprintln!("error: {e}");
-            flush_and_exit(1);
+            flush_and_exit(if is_preflight { 2 } else { 1 });
         }
     }
 }
