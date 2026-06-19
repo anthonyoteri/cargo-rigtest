@@ -19,9 +19,12 @@ the rest of your code.
 |----------------------------------|:----------:|:-------------:|:-------------:|
 | Process isolation per test       |     —      |       ✓       |       ✓       |
 | Captured output on failure       |     —      |       ✓       |       ✓       |
-| Per-test timeout / retries       |     —      |     ✓¹       |       ✓       |
+| Per-test timeout / retries       |     —      |      ✓¹       |       ✓       |
+| Tag-based test filtering         |     —      |       —       |       ✓       |
+| Parametrized cases (`#[case]`)   |     —      |       —       |       ✓       |
 | Global setup / teardown          |     —      |       —       |       ✓       |
 | Per-test setup / teardown        |     —      |       —       |       ✓       |
+| JUnit XML reporter               |     —      |      ✓¹       |       ✓       |
 | Built-in HTTP client             |     —      |       —       |       ✓       |
 | Built-in SSH client              |     —      |       —       |       ✓       |
 
