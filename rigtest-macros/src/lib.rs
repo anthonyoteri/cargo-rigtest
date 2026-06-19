@@ -5,9 +5,13 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::parse::Parser;
 use syn::parse_macro_input;
+use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
+use syn::Expr;
 use syn::FnArg;
 use syn::ItemFn;
 use syn::Pat;
+use syn::Token;
 
 /// Marks a `fn main()` as the entry point for a cargo-rigtest test binary.
 ///
@@ -211,26 +215,154 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// must be released regardless of outcome should be managed in
 /// `#[global_teardown]`, which runs in the coordinator process outside the
 /// killed subprocess.
+///
+/// # Parametrized cases
+///
+/// A test can be expanded into a table of cases by stacking one or more
+/// `#[case(...)]` attributes above the function and tagging the parameters
+/// that vary per row with `#[case]`. Each row becomes its own registered
+/// `TestCase` with a unique name of the form `<fn>::case_<N>` (or
+/// `<fn>::case_<N>_<label>` when the `#[case::label(...)]` form is used).
+/// All `#[testcase]` flags (`serial`, `timeout`, `retries`) apply to every
+/// generated row.
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use rigtest::{testcase, TestContext};
+///
+/// #[testcase]
+/// #[case("alice", "admin")]
+/// #[case::viewer("bob", "viewer")]
+/// async fn user_has_expected_role(
+///     _ctx: Arc<TestContext>,
+///     #[case] user: &str,
+///     #[case] expected_role: &str,
+/// ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+///     assert!(!user.is_empty());
+///     assert!(matches!(expected_role, "admin" | "viewer"));
+///     Ok(())
+/// }
+/// ```
+///
+/// In the example above two tests are registered:
+/// `user_has_expected_role::case_1` and
+/// `user_has_expected_role::case_2_viewer`. Non-`#[case]` parameters (for
+/// example `ctx`) are wired in as before; only `#[case]`-tagged parameters
+/// receive per-row values.
 #[proc_macro_attribute]
 pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let func = parse_macro_input!(item as ItemFn);
-    let func_ident = &func.sig.ident;
+    match expand_testcase(attr, item) {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, syn::Error> {
+    let mut func: ItemFn = syn::parse(item)?;
+    let func_ident = func.sig.ident.clone();
     let func_name_str = func_ident.to_string();
 
-    let metas = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+    let TestcaseFlags {
+        serial,
+        timeout_tokens,
+        retries_tokens,
+        tags_tokens,
+    } = parse_testcase_flags(attr)?;
+
+    // Extract and strip stacked `#[case(...)]` / `#[case::label(...)]`
+    // attributes from the function. Anything else stays on the re-emitted
+    // function definition.
+    let mut case_rows: Vec<CaseRow> = Vec::new();
+    let mut other_attrs = Vec::with_capacity(func.attrs.len());
+    for attr in func.attrs.drain(..) {
+        match parse_case_attr(&attr) {
+            Some(Ok(row)) => case_rows.push(row),
+            Some(Err(err)) => return Err(err),
+            None => other_attrs.push(attr),
+        }
+    }
+    func.attrs = other_attrs;
+
+    // Identify which positional parameters are tagged `#[case]` and strip
+    // the marker so the re-emitted function compiles unchanged.
+    let mut case_param_positions: Vec<usize> = Vec::new();
+    for (idx, input) in func.sig.inputs.iter_mut().enumerate() {
+        if let FnArg::Typed(pat_type) = input {
+            let before = pat_type.attrs.len();
+            pat_type.attrs.retain(|a| !a.path().is_ident("case"));
+            if pat_type.attrs.len() != before {
+                case_param_positions.push(idx);
+            }
+        }
+    }
+
+    validate_case_shape(&func, &case_rows, &case_param_positions)?;
+
+    // No `#[case]` markers and no `#[case(...)]` rows → preserve the
+    // historical single-test behaviour exactly.
+    if case_rows.is_empty() {
+        let static_ident = registration_ident(&func_name_str, None);
+        let expanded = quote! {
+            #[allow(clippy::unused_async)]
+            #func
+
+            #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
+            #[linkme(crate = ::rigtest::__linkme)]
+            static #static_ident: ::rigtest::registry::TestCase =
+                ::rigtest::registry::TestCase::new(
+                    #func_name_str,
+                    module_path!(),
+                    file!(),
+                    #serial,
+                    #timeout_tokens,
+                    #retries_tokens,
+                    #tags_tokens,
+                    |ctx| ::std::boxed::Box::pin(async move { #func_ident(ctx).await }),
+                );
+        };
+        return Ok(TokenStream::from(expanded));
+    }
+
+    let registrations = build_case_registrations(&CaseRegistrationInputs {
+        func: &func,
+        func_ident: &func_ident,
+        func_name_str: &func_name_str,
+        case_rows: &case_rows,
+        case_param_positions: &case_param_positions,
+        serial,
+        timeout_tokens: &timeout_tokens,
+        retries_tokens: &retries_tokens,
+        tags_tokens: &tags_tokens,
+    })?;
+
+    let expanded = quote! {
+        #[allow(clippy::unused_async)]
+        #func
+
+        #(#registrations)*
+    };
+
+    Ok(TokenStream::from(expanded))
+}
+
+struct TestcaseFlags {
+    serial: bool,
+    timeout_tokens: proc_macro2::TokenStream,
+    retries_tokens: proc_macro2::TokenStream,
+    tags_tokens: proc_macro2::TokenStream,
+}
+
+fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> {
+    let metas = Punctuated::<syn::Meta, Token![,]>::parse_terminated
         .parse(attr)
         .unwrap_or_default();
-
     let mut serial = false;
     let mut timeout_tokens = quote! { None };
     let mut retries_tokens = quote! { 0u32 };
     let mut tags_tokens = quote! { &[] as &'static [&'static str] };
-
     for meta in &metas {
         match meta {
-            syn::Meta::Path(p) if p.is_ident("serial") => {
-                serial = true;
-            }
+            syn::Meta::Path(p) if p.is_ident("serial") => serial = true,
             syn::Meta::NameValue(nv) if nv.path.is_ident("timeout") => {
                 let val = &nv.value;
                 timeout_tokens = quote! { Some(#val) };
@@ -239,42 +371,18 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let val = &nv.value;
                 retries_tokens = quote! { #val };
             }
-            syn::Meta::NameValue(nv) if nv.path.is_ident("tags") => match parse_tags(&nv.value) {
-                Ok(tokens) => tags_tokens = tokens,
-                Err(e) => return e.to_compile_error().into(),
-            },
+            syn::Meta::NameValue(nv) if nv.path.is_ident("tags") => {
+                tags_tokens = parse_tags(&nv.value)?;
+            }
             _ => {}
         }
     }
-
-    let static_ident = syn::Ident::new(
-        &format!(
-            "__RIGTEST_TESTCASE_{}",
-            func_name_str.to_uppercase().replace('-', "_")
-        ),
-        Span::call_site(),
-    );
-
-    let expanded = quote! {
-        #[allow(clippy::unused_async)]
-        #func
-
-        #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
-        #[linkme(crate = ::rigtest::__linkme)]
-        static #static_ident: ::rigtest::registry::TestCase =
-            ::rigtest::registry::TestCase::new(
-                #func_name_str,
-                module_path!(),
-                file!(),
-                #serial,
-                #timeout_tokens,
-                #retries_tokens,
-                #tags_tokens,
-                |ctx| ::std::boxed::Box::pin(async move { #func_ident(ctx).await }),
-            );
-    };
-
-    TokenStream::from(expanded)
+    Ok(TestcaseFlags {
+        serial,
+        timeout_tokens,
+        retries_tokens,
+        tags_tokens,
+    })
 }
 
 /// Parse the value of `tags = [...]` into a token stream that produces a
@@ -324,6 +432,202 @@ fn parse_tags(value: &syn::Expr) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     Ok(quote! { &[ #( #literals ),* ] as &'static [&'static str] })
+}
+
+/// Validate the relationship between `#[case(...)]` rows and `#[case]`
+/// parameter markers, surfacing mismatches as actionable compile errors
+/// pointing at the offending span.
+fn validate_case_shape(
+    func: &ItemFn,
+    case_rows: &[CaseRow],
+    case_param_positions: &[usize],
+) -> Result<(), syn::Error> {
+    if !case_rows.is_empty() && case_param_positions.is_empty() {
+        return Err(syn::Error::new(
+            case_rows[0].span,
+            "#[case(...)] rows are present but no function parameter is tagged with #[case]; \
+             add `#[case]` to each parameter that should receive a per-row value",
+        ));
+    }
+    if case_rows.is_empty() && !case_param_positions.is_empty() {
+        let span = func
+            .sig
+            .inputs
+            .iter()
+            .nth(case_param_positions[0])
+            .map_or_else(Span::call_site, Spanned::span);
+        return Err(syn::Error::new(
+            span,
+            "function parameter is tagged with #[case] but no #[case(...)] rows are stacked \
+             above the function; add one or more `#[case(value, ...)]` attributes",
+        ));
+    }
+    for row in case_rows {
+        if row.values.len() != case_param_positions.len() {
+            return Err(syn::Error::new(
+                row.span,
+                format!(
+                    "#[case(...)] has {got} value(s) but the function has {want} #[case]-tagged \
+                     parameter(s); every row must supply exactly one value per tagged parameter",
+                    got = row.values.len(),
+                    want = case_param_positions.len(),
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn registration_ident(func_name: &str, suffix: Option<&str>) -> syn::Ident {
+    let upper = func_name.to_uppercase().replace('-', "_");
+    let name = if let Some(s) = suffix {
+        format!(
+            "__RIGTEST_TESTCASE_{upper}_{}",
+            s.to_uppercase().replace('-', "_")
+        )
+    } else {
+        format!("__RIGTEST_TESTCASE_{upper}")
+    };
+    syn::Ident::new(&name, Span::call_site())
+}
+
+struct CaseRegistrationInputs<'a> {
+    func: &'a ItemFn,
+    func_ident: &'a syn::Ident,
+    func_name_str: &'a str,
+    case_rows: &'a [CaseRow],
+    case_param_positions: &'a [usize],
+    serial: bool,
+    timeout_tokens: &'a proc_macro2::TokenStream,
+    retries_tokens: &'a proc_macro2::TokenStream,
+    tags_tokens: &'a proc_macro2::TokenStream,
+}
+
+fn build_case_registrations(
+    inputs: &CaseRegistrationInputs<'_>,
+) -> Result<Vec<proc_macro2::TokenStream>, syn::Error> {
+    let &CaseRegistrationInputs {
+        func,
+        func_ident,
+        func_name_str,
+        case_rows,
+        case_param_positions,
+        serial,
+        timeout_tokens,
+        retries_tokens,
+        tags_tokens,
+    } = inputs;
+    // Reject more than one non-case parameter so the error fires at macro
+    // expansion rather than as a confusing type mismatch later.
+    let non_case_positions: Vec<usize> = (0..func.sig.inputs.len())
+        .filter(|i| !case_param_positions.contains(i))
+        .collect();
+    if non_case_positions.len() > 1 {
+        let span = func
+            .sig
+            .inputs
+            .iter()
+            .nth(non_case_positions[1])
+            .map_or_else(Span::call_site, Spanned::span);
+        return Err(syn::Error::new(
+            span,
+            "parametrized #[testcase] supports at most one non-#[case] parameter \
+             (the `ctx: Arc<TestContext>` argument)",
+        ));
+    }
+
+    let mut registrations = Vec::with_capacity(case_rows.len());
+    for (i, row) in case_rows.iter().enumerate() {
+        let index = i + 1;
+        let suffix = match &row.label {
+            Some(label) => format!("case_{index}_{label}"),
+            None => format!("case_{index}"),
+        };
+        let case_name = format!("{func_name_str}::{suffix}");
+        let static_ident = registration_ident(func_name_str, Some(&suffix));
+
+        // Build the positional call: case values slot into the tagged
+        // positions, `ctx` fills the (at most one) remaining position.
+        let mut call_args: Vec<proc_macro2::TokenStream> =
+            Vec::with_capacity(func.sig.inputs.len());
+        let mut value_iter = row.values.iter();
+        for idx in 0..func.sig.inputs.len() {
+            if case_param_positions.contains(&idx) {
+                let Some(val) = value_iter.next() else {
+                    // Length already validated by `validate_case_shape`; reaching
+                    // this branch would be an internal invariant break.
+                    return Err(syn::Error::new(
+                        row.span,
+                        "internal error: case row value count mismatch",
+                    ));
+                };
+                call_args.push(quote! { #val });
+            } else {
+                call_args.push(quote! { ctx });
+            }
+        }
+
+        registrations.push(quote! {
+            #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
+            #[linkme(crate = ::rigtest::__linkme)]
+            static #static_ident: ::rigtest::registry::TestCase =
+                ::rigtest::registry::TestCase::new(
+                    #case_name,
+                    module_path!(),
+                    file!(),
+                    #serial,
+                    #timeout_tokens,
+                    #retries_tokens,
+                    #tags_tokens,
+                    |ctx| ::std::boxed::Box::pin(async move {
+                        #func_ident(#(#call_args),*).await
+                    }),
+                );
+        });
+    }
+
+    Ok(registrations)
+}
+
+/// A parsed `#[case(...)]` / `#[case::label(...)]` row.
+struct CaseRow {
+    /// Optional label following `case::`, used to disambiguate the
+    /// generated test-name suffix.
+    label: Option<String>,
+    /// Positional values supplied for the row, one per `#[case]`-tagged
+    /// parameter on the function signature.
+    values: Vec<Expr>,
+    /// Span of the original attribute, used for diagnostics.
+    span: Span,
+}
+
+/// Recognise `#[case(...)]` / `#[case::label(...)]` attributes and parse
+/// their positional argument list. Returns `None` for unrelated attributes.
+fn parse_case_attr(attr: &syn::Attribute) -> Option<Result<CaseRow, syn::Error>> {
+    let path = attr.path();
+    let segments: Vec<&syn::PathSegment> = path.segments.iter().collect();
+    let (label, is_case) = match segments.as_slice() {
+        [seg] if seg.ident == "case" => (None, true),
+        [first, second] if first.ident == "case" => (Some(second.ident.to_string()), true),
+        _ => (None, false),
+    };
+    if !is_case {
+        return None;
+    }
+
+    let span = attr.span();
+    let values_result = attr
+        .parse_args_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+        .map(|p| p.into_iter().collect::<Vec<_>>());
+
+    Some(match values_result {
+        Ok(values) => Ok(CaseRow {
+            label,
+            values,
+            span,
+        }),
+        Err(e) => Err(e),
+    })
 }
 
 /// Registers an async function as the global setup hook for a test binary.

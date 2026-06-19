@@ -123,6 +123,40 @@ Optional flags can be combined in any order:
 > released regardless of outcome should be handled in
 > `#[global_teardown]`, which runs outside the test subprocess.
 
+#### Parametrized cases (`#[case]`)
+
+A test can be expanded into a table of cases by stacking one or more
+`#[case(...)]` attributes above the function and tagging the parameters
+that vary per row with `#[case]`. Each row is registered as its own
+`TestCase`, runs in its own subprocess, and shows up as a distinct row
+in the runner output and the JUnit report.
+
+```rust
+#[testcase]
+#[case("alice", "admin")]
+#[case::viewer("bob", "viewer")]
+async fn user_has_expected_role(
+    _ctx: Arc<TestContext>,
+    #[case] user: &str,
+    #[case] expected_role: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // ...
+    Ok(())
+}
+```
+
+The example above registers two tests, named
+`user_has_expected_role::case_1` and
+`user_has_expected_role::case_2_viewer`. Unlabelled rows use the
+`case_<N>` form; the optional `#[case::label(...)]` form appends
+`_<label>` for readability. The `<N>` prefix is always present so
+duplicate labels (or duplicate values) can never collide.
+
+All flags on `#[testcase]` (`serial`, `timeout`, `retries`, `tags`)
+apply identically to every generated row. Non-`#[case]` parameters
+(typically `ctx: Arc<TestContext>`) are wired in as usual; only
+`#[case]`-tagged parameters receive per-row values.
+
 #### Tags
 
 Tag a test with one or more string labels, then subset the suite at the
