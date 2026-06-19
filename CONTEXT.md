@@ -16,6 +16,12 @@ by `http` and `ssh` probes so a passing probe predicts that real tests
 can connect with the same configuration.
 _Avoid_: client builder, customiser, hook.
 
+**Coordinator**:
+The parent rigtest process that loads the registry, runs preflight,
+schedules tests, and spawns subprocesses. Holds global setup state
+between tests and runs global teardown.
+_Avoid_: parent, runner, harness, scheduler.
+
 **Preflight**:
 The phase that runs once in the coordinator, before any test subprocess
 is spawned, to verify the suite's declared external dependencies. Also
@@ -33,3 +39,10 @@ _Avoid_: probe type, check kind, family.
 A single check declared inside a `Preflight` builder. A probe either
 **passes** or **fails** — never "reaches" or "succeeds."
 _Avoid_: test, assertion, check, dependency, reachability test.
+
+**Subprocess**:
+A child process spawned by the coordinator to run exactly one test.
+Crash isolation, deterministic per-test state, and OS-level resource
+teardown are direct consequences of running each test in its own
+subprocess.
+_Avoid_: worker, child, slave, test process.
