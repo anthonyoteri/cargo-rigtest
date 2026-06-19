@@ -794,7 +794,7 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `#[global_setup]` and before any test subprocess is spawned. It declares
 /// the external dependencies the suite needs — TCP endpoints, environment
 /// variables, and (in future releases) DNS records, HTTP services, SSH
-/// hosts — by building a [`rigtest::Preflight`] value and returning it.
+/// hosts — by building a `rigtest::Preflight` value and returning it.
 ///
 /// At most one `#[preflight]` may be defined per test binary. If any
 /// declared probe fails, the coordinator prints a readiness table, exits
