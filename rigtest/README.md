@@ -203,10 +203,9 @@ fn preflight() -> Preflight {
 }
 ```
 
-In this release `#[preflight]` accepts exactly one signature —
-`fn() -> Preflight`. `async`, additional parameters, and return types other
-than `Preflight` are rejected at compile time. A profile-aware 1-arg form
-is planned for a later release.
+`#[preflight]` accepts the signature `fn() -> Preflight`. `async`,
+additional parameters, and return types other than `Preflight` are
+rejected at compile time.
 
 #### Probe primitives
 

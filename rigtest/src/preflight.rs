@@ -23,8 +23,7 @@
 //! }
 //! ```
 //!
-//! Only `fn() -> Preflight` is accepted in this release; the
-//! profile-aware 1-arg form is planned for a later release.
+//! `#[preflight]` accepts `fn() -> Preflight`.
 //!
 //! See `CONTEXT.md` for the canonical vocabulary (probe, primitive,
 //! preflight, coordinator).

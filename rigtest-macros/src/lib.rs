@@ -793,8 +793,8 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The annotated function runs once in the coordinator before
 /// `#[global_setup]` and before any test subprocess is spawned. It declares
 /// the external dependencies the suite needs — TCP endpoints, environment
-/// variables, and (in future releases) DNS records, HTTP services, SSH
-/// hosts — by building a `rigtest::Preflight` value and returning it.
+/// variables, DNS records, HTTP endpoints, SSH hosts, and custom checks —
+/// by building a `rigtest::Preflight` value and returning it.
 ///
 /// At most one `#[preflight]` may be defined per test binary. If any
 /// declared probe fails, the coordinator prints a readiness table, exits
@@ -802,15 +802,14 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Signature
 ///
-/// In this release `#[preflight]` accepts exactly one signature:
+/// `#[preflight]` accepts the signature:
 ///
 /// ```text
 /// fn name() -> Preflight { ... }
 /// ```
 ///
 /// `async fn`, additional parameters, and return types other than
-/// `Preflight` are rejected at compile time with an actionable message. A
-/// profile-aware 1-arg form is planned for a later release.
+/// `Preflight` are rejected at compile time with an actionable message.
 ///
 /// # Example
 ///
@@ -839,7 +838,7 @@ fn expand_preflight(attr: TokenStream, item: TokenStream) -> Result<TokenStream,
     if !attr2.is_empty() {
         return Err(syn::Error::new_spanned(
             attr2,
-            "#[preflight] does not accept any arguments in this release",
+            "#[preflight] does not accept any arguments",
         ));
     }
 
@@ -856,8 +855,7 @@ fn expand_preflight(attr: TokenStream, item: TokenStream) -> Result<TokenStream,
     if !func.sig.inputs.is_empty() {
         return Err(syn::Error::new_spanned(
             &func.sig.inputs,
-            "#[preflight] functions must take no arguments in this release \
-             (the profile-aware 1-arg form is planned for a later release)",
+            "#[preflight] functions must take no arguments",
         ));
     }
 
@@ -878,8 +876,7 @@ fn expand_preflight(attr: TokenStream, item: TokenStream) -> Result<TokenStream,
     if !return_type_is_preflight(return_ty) {
         return Err(syn::Error::new_spanned(
             return_ty,
-            "#[preflight] functions must return `Preflight` (no other return types are \
-             accepted in this release)",
+            "#[preflight] functions must return `Preflight`",
         ));
     }
 
