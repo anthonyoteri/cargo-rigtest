@@ -156,6 +156,35 @@ fn apply_filter<'a>(
         .collect()
 }
 
+/// Filter `cases` to those matching `--tag` (if any) and not matching any
+/// `--not-tag`. Both sets are deduplicated and compared case-sensitively
+/// against each test's `tags` slice. Empty inputs are no-ops.
+fn apply_tag_filter<'a>(
+    cases: &[&'a crate::registry::TestCase],
+    include: &std::collections::HashSet<&str>,
+    exclude: &std::collections::HashSet<&str>,
+) -> Vec<&'a crate::registry::TestCase> {
+    cases
+        .iter()
+        .filter(|tc| {
+            let included = include.is_empty() || tc.tags.iter().any(|t| include.contains(t));
+            let excluded = !exclude.is_empty() && tc.tags.iter().any(|t| exclude.contains(t));
+            included && !excluded
+        })
+        .copied()
+        .collect()
+}
+
+/// Convert a list of CLI-supplied tag values into a deduplicated set,
+/// stripping empty entries that result from inputs like `--tag smoke,,fast`.
+fn tag_set(values: &[String]) -> std::collections::HashSet<&str> {
+    values
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 enum Outcome {
     Passed,
@@ -378,7 +407,10 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     };
 
     let cases_refs: Vec<&'static crate::registry::TestCase> = RIG_TEST_CASES.iter().collect();
-    let mut cases = apply_filter(&cases_refs, args.filter.as_deref());
+    let name_filtered = apply_filter(&cases_refs, args.filter.as_deref());
+    let include_tags = tag_set(&args.tag);
+    let exclude_tags = tag_set(&args.not_tag);
+    let mut cases = apply_tag_filter(&name_filtered, &include_tags, &exclude_tags);
 
     println!("cargo-rigtest: running with seed {seed}");
 
@@ -449,11 +481,18 @@ mod tests {
             serial: false,
             timeout: None,
             retries: 0,
+            tags: &[],
             test_fn: |_ctx: Arc<TestContext>| -> BoxFuture<
                 'static,
                 Result<(), Box<dyn std::error::Error + Send + Sync>>,
             > { Box::pin(async { Ok(()) }) },
         }
+    }
+
+    fn case_with_tags(name: &'static str, tags: &'static [&'static str]) -> TestCase {
+        let mut tc = make_case(name);
+        tc.tags = tags;
+        tc
     }
 
     #[test]
@@ -481,6 +520,96 @@ mod tests {
         let cases = [make_case("foo"), make_case("bar")];
         let refs: Vec<&TestCase> = cases.iter().collect();
         assert_eq!(apply_filter(&refs, Some("xyz")).len(), 0);
+    }
+
+    // ── Tag filter ──────────────────────────────────────────────────────
+
+    #[test]
+    fn tag_filter_with_empty_sets_returns_all() {
+        let cases = [
+            case_with_tags("a", &["smoke"]),
+            case_with_tags("b", &[]),
+            case_with_tags("c", &["regression"]),
+        ];
+        let refs: Vec<&TestCase> = cases.iter().collect();
+        let include = std::collections::HashSet::new();
+        let exclude = std::collections::HashSet::new();
+        assert_eq!(apply_tag_filter(&refs, &include, &exclude).len(), 3);
+    }
+
+    #[test]
+    fn tag_filter_include_keeps_tests_matching_any_tag() {
+        let cases = [
+            case_with_tags("smoke_only", &["smoke"]),
+            case_with_tags("regression_only", &["regression"]),
+            case_with_tags("both", &["smoke", "regression"]),
+            case_with_tags("untagged", &[]),
+        ];
+        let refs: Vec<&TestCase> = cases.iter().collect();
+        let include: std::collections::HashSet<&str> = ["smoke"].into_iter().collect();
+        let exclude = std::collections::HashSet::new();
+        let filtered = apply_tag_filter(&refs, &include, &exclude);
+        let names: Vec<&str> = filtered.iter().map(|tc| tc.name).collect();
+        assert_eq!(names, vec!["smoke_only", "both"]);
+    }
+
+    #[test]
+    fn tag_filter_include_multiple_unions() {
+        let cases = [
+            case_with_tags("smoke_only", &["smoke"]),
+            case_with_tags("regression_only", &["regression"]),
+            case_with_tags("slow_only", &["slow"]),
+        ];
+        let refs: Vec<&TestCase> = cases.iter().collect();
+        let include: std::collections::HashSet<&str> =
+            ["smoke", "regression"].into_iter().collect();
+        let exclude = std::collections::HashSet::new();
+        let filtered = apply_tag_filter(&refs, &include, &exclude);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn tag_filter_exclude_drops_tests_matching_any_tag() {
+        let cases = [
+            case_with_tags("fast", &["smoke"]),
+            case_with_tags("slow_smoke", &["smoke", "slow"]),
+            case_with_tags("untagged", &[]),
+        ];
+        let refs: Vec<&TestCase> = cases.iter().collect();
+        let include = std::collections::HashSet::new();
+        let exclude: std::collections::HashSet<&str> = ["slow"].into_iter().collect();
+        let filtered = apply_tag_filter(&refs, &include, &exclude);
+        let names: Vec<&str> = filtered.iter().map(|tc| tc.name).collect();
+        assert_eq!(names, vec!["fast", "untagged"]);
+    }
+
+    #[test]
+    fn tag_filter_include_and_exclude_compose_with_and() {
+        let cases = [
+            case_with_tags("smoke_fast", &["smoke"]),
+            case_with_tags("smoke_slow", &["smoke", "slow"]),
+            case_with_tags("regression_fast", &["regression"]),
+        ];
+        let refs: Vec<&TestCase> = cases.iter().collect();
+        let include: std::collections::HashSet<&str> = ["smoke"].into_iter().collect();
+        let exclude: std::collections::HashSet<&str> = ["slow"].into_iter().collect();
+        let filtered = apply_tag_filter(&refs, &include, &exclude);
+        let names: Vec<&str> = filtered.iter().map(|tc| tc.name).collect();
+        assert_eq!(names, vec!["smoke_fast"]);
+    }
+
+    #[test]
+    fn tag_set_dedupes_and_drops_empty() {
+        let values = vec![
+            "smoke".to_string(),
+            String::new(),
+            "smoke".to_string(),
+            "regression".to_string(),
+        ];
+        let set = tag_set(&values);
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("smoke"));
+        assert!(set.contains("regression"));
     }
 
     // ── Subprocess seam demo tests ───────────────────────────────────────

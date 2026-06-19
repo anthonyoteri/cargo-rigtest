@@ -55,6 +55,17 @@ struct RunArgs {
     #[arg(short, long)]
     filter: Option<String>,
 
+    /// Only run tests tagged with one of TAGS. Repeat the flag and/or pass a
+    /// comma-separated list — both forms union together. Combined with
+    /// `--not-tag` and `--filter` using AND.
+    #[arg(long = "tag", value_name = "TAGS", value_delimiter = ',', action = clap::ArgAction::Append)]
+    tag: Vec<String>,
+
+    /// Exclude tests tagged with any of TAGS. Repeat the flag and/or pass a
+    /// comma-separated list — both forms union together.
+    #[arg(long = "not-tag", value_name = "TAGS", value_delimiter = ',', action = clap::ArgAction::Append)]
+    not_tag: Vec<String>,
+
     /// Package containing the test targets
     #[arg(short, long)]
     package: Option<String>,
@@ -180,6 +191,12 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         }
         if let Some(ref filter) = args.filter {
             test_cmd.args(["--filter", filter]);
+        }
+        for tag in &args.tag {
+            test_cmd.args(["--tag", tag]);
+        }
+        for tag in &args.not_tag {
+            test_cmd.args(["--not-tag", tag]);
         }
         if args.no_capture {
             test_cmd.arg("--no-capture");

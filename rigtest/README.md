@@ -113,6 +113,7 @@ Optional flags can be combined in any order:
 | `serial` | Run this test exclusively — no other test runs concurrently with it |
 | `timeout = <Duration>` | Hard-kill the test subprocess and report failure if it exceeds the duration |
 | `retries = <N>` | Retry a failing test up to N additional times before reporting failure |
+| `tags = ["smoke", …]` | Attach string tags for use with the `--tag` / `--not-tag` CLI filters |
 
 > **Note on timeout and teardown:** when a timeout fires, the subprocess is
 > terminated — on Linux and macOS a graceful signal is sent first, with a
@@ -121,6 +122,27 @@ Optional flags can be combined in any order:
 > registered with `ctx.teardown(...)` will not run. Resources that must be
 > released regardless of outcome should be handled in
 > `#[global_teardown]`, which runs outside the test subprocess.
+
+#### Tags
+
+Tag a test with one or more string labels, then subset the suite at the
+command line via the `cargo rigtest run --tag` / `--not-tag` flags.
+Pre-promotion smoke runs, nightly regressions, and "skip the slow stuff"
+become declarative rather than name-pattern hacks.
+
+```rust
+#[testcase(tags = ["smoke"])]
+async fn login_works(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> { Ok(()) }
+
+#[testcase(tags = ["smoke", "regression"])]
+async fn checkout_completes(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> { Ok(()) }
+
+#[testcase(tags = ["slow"])]
+async fn full_migration_replay(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> { Ok(()) }
+```
+
+See the [`cargo-rigtest`](https://crates.io/crates/cargo-rigtest) crate
+for the matching CLI flags and how they compose with `--filter`.
 
 ### `#[global_setup]`
 

@@ -67,6 +67,8 @@ cargo rigtest run [OPTIONS]
 | `--jobs <N>` | Maximum parallel test jobs (default: number of CPUs) |
 | `--seed <N>` | Fix the random order seed for reproducible runs |
 | `--filter <STRING>` | Only run tests whose name contains STRING |
+| `--tag <TAGS>` | Only run tests tagged with one of `TAGS`. Repeat the flag and/or pass a comma list (`--tag smoke,regression`) — both forms union together. See [Tags and filtering](#tags-and-filtering). |
+| `--not-tag <TAGS>` | Exclude tests tagged with any of `TAGS`. Same repeat/comma rules as `--tag`. |
 | `--test <NAME>` | Only run the named test target (repeatable: `--test a --test b`) |
 | `--package <NAME>` | Package containing the test targets |
 | `--no-capture` | Print test output in real time instead of capturing it (implies `--jobs 1`) |
@@ -118,6 +120,28 @@ cargo rigtest run --test smoke --test e2e  # run two
 
 cargo-rigtest identifies rigtest test targets automatically and ignores any
 other `harness = false` binaries in the package.
+
+---
+
+## Tags and filtering
+
+Tests can carry string tags via the `#[testcase(tags = […])]` attribute
+(see [`rigtest`](https://crates.io/crates/rigtest)). The `--tag` and
+`--not-tag` flags subset the suite by those tags at the command line.
+
+```
+cargo rigtest run --tag smoke                  # tests tagged "smoke"
+cargo rigtest run --tag smoke,regression       # union: tagged either
+cargo rigtest run --tag smoke --tag regression # equivalent: repeat the flag
+cargo rigtest run --not-tag slow               # exclude "slow"
+cargo rigtest run --tag smoke --not-tag slow   # smoke AND NOT slow
+```
+
+`--tag`, `--not-tag`, and `--filter` compose with AND: a test must match
+the name filter, match at least one `--tag` (when any are given), and
+match none of the `--not-tag` values. If nothing matches, the run exits
+cleanly with a zero-result summary — the same behaviour as a `--filter`
+that matches no tests.
 
 ---
 
