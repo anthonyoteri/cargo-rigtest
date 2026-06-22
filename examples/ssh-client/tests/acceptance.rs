@@ -1,9 +1,35 @@
-use rigtest::{global_setup, global_teardown, testcase, TestContext};
+use rigtest::{global_setup, global_teardown, preflight, testcase, Preflight, TestContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[cfg(unix)]
 use rigtest::openssh::KnownHosts;
+
+// A preflight for an SSH-tested suite. We demonstrate the SSH probe
+// behind an opt-in env var (`RIGTEST_SSH_HOST`) so the example links
+// and runs in CI without a live SSH host: the `.env(...)` baseline
+// probe passes deterministically; the `.ssh(...)` probe runs only when
+// the operator opts in.
+//
+// In a real preflight you'd typically declare the `.ssh(...)` probe
+// unconditionally — see `rigtest/README.md` for the full primitive
+// table and the `command(...)` / `timeout(...)` overrides.
+#[cfg(unix)]
+#[preflight]
+fn checks() -> Preflight {
+    let preflight = Preflight::new().env("path_is_set", "PATH");
+    if let Ok(host) = std::env::var("RIGTEST_SSH_HOST") {
+        preflight.ssh("ssh_bastion", host).command("true")
+    } else {
+        preflight
+    }
+}
+
+#[cfg(not(unix))]
+#[preflight]
+fn checks() -> Preflight {
+    Preflight::new().env("path_is_set", "PATH")
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct SharedState {
