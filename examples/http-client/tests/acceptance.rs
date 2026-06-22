@@ -2,18 +2,24 @@ use rigtest::{global_setup, global_teardown, preflight, testcase, Preflight, Tes
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-// A preflight that demonstrates `.dns(...)` — the deterministic, no-port
-// DNS probe. We resolve `localhost`, which is guaranteed to resolve on
-// every supported platform without a working DNS resolver, so this
-// example links and runs in CI without external dependencies.
+// A profile-aware preflight demonstrating both `.dns(...)` and the
+// 1-arg `fn(env: &str) -> Preflight` signature: the probe target
+// switches based on the active profile name supplied by the framework.
+// Pre-#47 the profile name comes from the `RIGTEST_PROFILE` env var,
+// defaulting to the empty string — so the default branch resolves
+// `localhost`, guaranteed to resolve on every supported platform.
 //
-// A real-world HTTP-tested suite would typically also include a
-// `.http("api", "https://staging.example.com/health")` probe, which
-// reuses the `configure_client` configurator declared below — see
-// `rigtest/README.md` for the full primitive table.
+// A real suite would typically also add a `.http("api", ...)` probe
+// here, which would reuse the `configure_client` configurator declared
+// below — see `rigtest/README.md` for the full primitive table.
 #[preflight]
-fn checks() -> Preflight {
-    Preflight::new().dns("dns_localhost", "localhost")
+fn checks(env: &str) -> Preflight {
+    let host: &'static str = match env {
+        "prod" => "prod.example.com",
+        "staging" => "staging.example.com",
+        _ => "localhost",
+    };
+    Preflight::new().dns("dns_target", host)
 }
 
 #[derive(Serialize, Deserialize)]

@@ -265,6 +265,24 @@ pub(crate) mod runner;
 pub(crate) mod scheduler;
 pub(crate) mod subprocess;
 
+/// Internal helpers used by macro-generated code and the runtime. Not part
+/// of the stable public API; everything inside is `#[doc(hidden)]`.
+#[doc(hidden)]
+pub mod __internal {
+    /// Returns the active profile name, supplied to the 1-arg
+    /// `#[preflight]` signature as a `&str`.
+    ///
+    /// Pre-#47 (the profiles feature) this sources from the
+    /// `RIGTEST_PROFILE` environment variable, defaulting to the empty
+    /// string when unset or non-UTF8. Once profiles ship this single
+    /// function changes to consult the resolved profile from
+    /// `rigtest.toml` — no caller-side change required.
+    #[must_use]
+    pub fn active_profile_name() -> String {
+        std::env::var("RIGTEST_PROFILE").unwrap_or_default()
+    }
+}
+
 pub use context::TestContext;
 #[cfg(all(feature = "ssh-client", unix))]
 pub use openssh;

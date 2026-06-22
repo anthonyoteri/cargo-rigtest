@@ -23,7 +23,9 @@
 //! }
 //! ```
 //!
-//! `#[preflight]` accepts `fn() -> Preflight`.
+//! `#[preflight]` accepts `fn() -> Preflight` or
+//! `fn(env: &str) -> Preflight`. The 1-arg form receives the active
+//! profile name.
 //!
 //! Builder methods accept any `impl Into<Cow<'static, str>>` — both string
 //! literals (zero-allocation, stored as `Cow::Borrowed`) and owned strings
@@ -54,7 +56,8 @@ use crate::registry::BoxError;
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default acceptable status range for HTTP probes — every standard
-/// success status (`200..=299`). Override with [`Preflight::expect_status`].
+/// success status (`200..=299`). Override with `Preflight::expect_status`
+/// (available when the `http-client` feature is enabled).
 pub const DEFAULT_HTTP_OK_STATUS: RangeInclusive<u16> = 200..=299;
 
 /// Default remote command run by SSH probes. `true` is portable across
@@ -66,7 +69,8 @@ pub const DEFAULT_SSH_COMMAND: &str = "true";
 ///
 /// Constructed from a single `u16` (exact match) or a `RangeInclusive<u16>`
 /// (any code in the inclusive range) via `Into`. Used as the argument to
-/// [`Preflight::expect_status`].
+/// `Preflight::expect_status` (available when the `http-client` feature is
+/// enabled).
 ///
 /// Variants may be added in future releases. The `#[non_exhaustive]`
 /// attribute prevents external code from constructing this enum directly —
@@ -191,6 +195,44 @@ pub enum ProbeKind {
     },
 }
 
+impl ProbeKind {
+    /// Short, stable, machine-readable type tag for a probe — `"tcp"`,
+    /// `"env"`, `"dns"`, `"http"`, `"ssh"`, or `"custom"`. Used by the
+    /// disambiguation algorithm so collisions across probe types render as
+    /// `name(type)` and within the same type as `name(type[target])`.
+    #[must_use]
+    pub(crate) fn type_tag(&self) -> &'static str {
+        match self {
+            Self::Tcp { .. } => "tcp",
+            Self::Env { .. } => "env",
+            Self::Dns { .. } => "dns",
+            #[cfg(feature = "http-client")]
+            Self::Http { .. } => "http",
+            #[cfg(all(feature = "ssh-client", unix))]
+            Self::Ssh { .. } => "ssh",
+            Self::Custom { .. } => "custom",
+        }
+    }
+
+    /// The natural "target" of a probe — the operator-visible parameter
+    /// that distinguishes one probe of this type from another. Used as the
+    /// tier-3 disambiguator. Returns `None` for `Custom`, which has no
+    /// inspectable target (the closure is opaque).
+    #[must_use]
+    pub(crate) fn natural_target(&self) -> Option<&str> {
+        match self {
+            Self::Tcp { target } => Some(target),
+            Self::Env { var, .. } => Some(var),
+            Self::Dns { host } => Some(host),
+            #[cfg(feature = "http-client")]
+            Self::Http { url, .. } => Some(url),
+            #[cfg(all(feature = "ssh-client", unix))]
+            Self::Ssh { dest, .. } => Some(dest),
+            Self::Custom { .. } => None,
+        }
+    }
+}
+
 impl fmt::Debug for ProbeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -250,13 +292,12 @@ pub struct Probe {
 /// Builder for a list of [`Probe`]s declared by a `#[preflight]` function.
 ///
 /// Use [`Preflight::new`] to start the chain, then call one of the probe
-/// constructors ([`tcp`][Self::tcp], [`env`][Self::env],
-/// [`dns`][Self::dns], [`http`][Self::http], [`ssh`][Self::ssh],
-/// [`custom`][Self::custom]), optionally followed by an adjustment
-/// ([`timeout`][Self::timeout], [`equals`][Self::equals],
-/// [`expect_status`][Self::expect_status], [`command`][Self::command])
-/// which acts on the most-recently-added probe. Each method returns
-/// `Preflight` so the chain reads naturally.
+/// constructors (`tcp`, `env`, `dns`, `http`, `ssh`, `custom`), optionally
+/// followed by an adjustment (`timeout`, `equals`, `expect_status`,
+/// `command`) which acts on the most-recently-added probe. Each method
+/// returns `Preflight` so the chain reads naturally. The `http`, `ssh`,
+/// `expect_status`, and `command` methods are gated behind the
+/// `http-client` and `ssh-client` features respectively.
 ///
 /// Every method that takes a string accepts `impl Into<Cow<'static, str>>`,
 /// so both string literals (zero-allocation, stored as `Cow::Borrowed`)

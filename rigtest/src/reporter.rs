@@ -83,6 +83,11 @@ pub(crate) trait TestEventReporter: Send + Sync + 'static {
         duration: Duration,
     );
     fn print_phase(&self, label: &str);
+    /// Called once with the structured per-probe results when a preflight
+    /// phase ran (whether passed or failed). Default no-op so the live
+    /// console reporter — which already streams probe lines directly —
+    /// doesn't need to do anything.
+    fn preflight_recorded(&self, _results: &[crate::preflight_runner::ProbeResult]) {}
     /// Called once at the end of the run. Returning `Err` causes the test
     /// binary to exit non-zero so a CI consumer can tell that an artifact
     /// the reporter promised (e.g. the `JUnit` XML file) was not produced.
@@ -385,6 +390,11 @@ impl TestEventReporter for MultiReporter {
     fn print_phase(&self, label: &str) {
         for r in &self.reporters {
             r.print_phase(label);
+        }
+    }
+    fn preflight_recorded(&self, results: &[crate::preflight_runner::ProbeResult]) {
+        for r in &self.reporters {
+            r.preflight_recorded(results);
         }
     }
     fn finish(

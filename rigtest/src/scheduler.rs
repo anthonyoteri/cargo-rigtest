@@ -49,6 +49,21 @@ pub struct RuntimeArgs {
     #[arg(long)]
     pub no_preflight: bool,
 
+    /// Run the preflight phase, print the readiness table, and exit
+    /// without running `#[global_setup]` or any tests. Exits 0 when every
+    /// declared probe passes, 2 when any probe fails. When no
+    /// `#[preflight]` is declared (or when combined with `--no-preflight`)
+    /// prints `no preflight declared` and exits 0.
+    #[arg(long)]
+    pub preflight_only: bool,
+
+    /// Treat preflight failures as warnings rather than aborting the
+    /// suite. Probes still appear in the readiness table and the `JUnit`
+    /// preflight testsuite; the final exit code reflects only the test
+    /// phase. Has no effect when paired with `--no-preflight`.
+    #[arg(long)]
+    pub continue_on_preflight_failure: bool,
+
     // ── Internal flags used in subprocess (single-test) mode ─────────────────
     // Hidden from `--help`; set by the coordinator when spawning per-test
     // subprocesses.

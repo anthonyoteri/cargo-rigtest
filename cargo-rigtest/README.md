@@ -67,13 +67,15 @@ cargo rigtest run [OPTIONS]
 | `--jobs <N>` | Maximum parallel test jobs (default: number of CPUs) |
 | `--seed <N>` | Fix the random order seed for reproducible runs |
 | `--filter <STRING>` | Only run tests whose name contains STRING |
-| `--tag <TAGS>` | Only run tests tagged with one of `TAGS`. Repeat the flag and/or pass a comma list (`--tag smoke,regression`) — both forms union together. See [Tags and filtering](#tags-and-filtering). |
-| `--not-tag <TAGS>` | Exclude tests tagged with any of `TAGS`. Same repeat/comma rules as `--tag`. |
+| `--tag <TAGS>` | Only run tests with matching tags (see [Tags and filtering](#tags-and-filtering)) |
+| `--not-tag <TAGS>` | Exclude tests with matching tags |
 | `--test <NAME>` | Only run the named test target (repeatable: `--test a --test b`) |
 | `--package <NAME>` | Package containing the test targets |
 | `--no-capture` | Print test output in real time instead of capturing it (implies `--jobs 1`) |
 | `--no-preflight` | Skip the preflight phase entirely (see [Preflight](#preflight)) |
-| `--reporter <KIND>` | Additional reporter to run alongside the console. `junit` emits `target/rigtest/junit.xml` (see [JUnit XML output](#junit-xml-output)) |
+| `--preflight-only` | Run only the preflight phase and exit |
+| `--continue-on-preflight-failure` | Don't abort on preflight failure; tests still run |
+| `--reporter <KIND>` | Additional reporter alongside the console (see [JUnit XML output](#junit-xml-output)) |
 
 The seed is printed at the start of every run so a failing order can be
 reproduced exactly:
@@ -178,6 +180,27 @@ cargo rigtest run --no-preflight
 This is intended for local debugging, not CI: preflight exists
 specifically to catch missing environment dependencies *before* tests run.
 
+### Running preflight by itself
+
+Pass `--preflight-only` to run the readiness check and exit without
+running tests — useful as a fast pre-deployment smoke check:
+
+```
+cargo rigtest run --preflight-only
+```
+
+Exits `0` when every probe passes and `2` when any probe fails. When
+the suite declares no `#[preflight]`, prints `no preflight declared`
+and exits `0`.
+
+### Continuing past preflight failures
+
+Pass `--continue-on-preflight-failure` to demote probe failures to
+warnings. The readiness table still prints; tests still run; the final
+exit code reflects only the test phase. Useful when you want to publish
+a JUnit report that shows both probe and test results regardless of
+suite outcome — combine with `--reporter junit`.
+
 ---
 
 ## JUnit XML output
@@ -193,6 +216,15 @@ This writes `target/rigtest/junit.xml` alongside the normal live console
 output. The document uses the standard JUnit schema with the
 `<flakyFailure>` and `<rerunFailure>` extensions for retried tests, so
 existing JUnit-based integrations consume it without changes.
+
+When a `#[preflight]` is declared, a synthetic `<testsuite
+name="preflight">` element is emitted *before* the regular test
+testsuite. Each probe becomes one `<testcase>` whose `name` attribute
+uses the disambiguated form (see the rigtest README for the tiered
+scheme); failed probes carry a `<failure>` child with the probe's error
+message. With `--no-preflight` or no `#[preflight]` declared the
+synthetic testsuite is absent — CI consumers can distinguish "preflight
+did not run" from "preflight ran and everything passed".
 
 In a Jenkins pipeline, point the `junit` step at the file after the run:
 

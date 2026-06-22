@@ -9,7 +9,7 @@
 //! always in declaration order. In a non-TTY environment (CI, piped
 //! output) the spinners are hidden and only the lines are emitted.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,7 @@ use crate::preflight::{CustomProbeFn, Probe, ProbeKind};
 use crate::registry::{PreflightEntry, RIG_PREFLIGHT};
 
 /// Outcome of a single probe.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum ProbeOutcome {
     Passed,
     Failed(String),
@@ -32,29 +32,67 @@ pub(crate) enum ProbeOutcome {
 
 #[derive(Debug)]
 pub(crate) struct ProbeResult {
+    /// The probe definition the result corresponds to. Kept so future
+    /// extensions (e.g. surfacing the probe `type` separately in the
+    /// `JUnit` testcase) can attach without a struct-shape change.
+    #[allow(dead_code)]
     pub probe: Probe,
     pub outcome: ProbeOutcome,
     pub elapsed: Duration,
+    /// Display name produced by the tiered disambiguation algorithm —
+    /// unique within the run. Used uniformly in the human-readable output
+    /// and the `JUnit` `<testcase name=...>` attribute.
+    pub display_name: String,
 }
 
-/// Run the preflight phase, if one is declared. Returns `Ok(())` when no
-/// preflight is declared, when every probe passes, or when the user passed
-/// `--no-preflight`. Returns `Err` with a formatted abort message when one
-/// or more probes fail (so the caller can exit with status 2) or when the
-/// suite's preflight is structurally invalid (duplicate names, more than
-/// one `#[preflight]` per binary).
+/// The full structured result of a preflight phase. Returned by
+/// [`run_preflight`] so the orchestrator can both render results and emit
+/// a `JUnit` `<testsuite name="preflight">` element with the same data.
+pub(crate) struct PreflightOutcome {
+    /// `true` when at least one probe was declared (i.e. a `#[preflight]`
+    /// was present and contained probes). When `false` the orchestrator
+    /// must not emit a synthetic `JUnit` testsuite — there is nothing to
+    /// report.
+    pub declared: bool,
+    /// Per-probe results in declaration order. Empty when no probes were
+    /// declared.
+    pub results: Vec<ProbeResult>,
+    /// `true` when every declared probe passed (or no probes were
+    /// declared). `false` when at least one probe failed.
+    pub passed: bool,
+}
+
+impl PreflightOutcome {
+    /// A no-op outcome representing "preflight did not run" (no
+    /// `#[preflight]` declared, or `--no-preflight` set). Distinguishable
+    /// from a passing preflight by `declared == false`.
+    pub(crate) fn none() -> Self {
+        Self {
+            declared: false,
+            results: Vec::new(),
+            passed: true,
+        }
+    }
+}
+
+/// Run the preflight phase, if one is declared.
 ///
-/// `tests_total` is the number of tests that would otherwise have run; the
-/// abort message reports it so operators see the cost of the failed
-/// preflight at a glance.
-pub(crate) async fn run_preflight(tests_total: usize) -> anyhow::Result<()> {
+/// Returns a [`PreflightOutcome`] in every non-error case — the caller
+/// decides whether to abort (default), continue with failures recorded
+/// (`--continue-on-preflight-failure`), or print the table and exit
+/// (`--preflight-only`). Returns `Err` only when the suite's preflight is
+/// structurally invalid (e.g. duplicate `name+type+target`, a `custom`
+/// probe collision, or more than one `#[preflight]` per binary) — those
+/// are the operator-error cases that must abort regardless of any flag.
+pub(crate) async fn run_preflight() -> anyhow::Result<PreflightOutcome> {
     if RIG_PREFLIGHT.is_empty() {
-        return Ok(());
+        return Ok(PreflightOutcome::none());
     }
     // `RIG_PREFLIGHT.len() <= 1` is asserted in the orchestrator before we
     // are called; index 0 is sound here.
     let entry: &PreflightEntry = &RIG_PREFLIGHT[0];
-    let preflight = (entry.build_fn)();
+    let profile = crate::__internal::active_profile_name();
+    let preflight = (entry.build_fn)(&profile);
     let probes = preflight.into_probes();
 
     let is_tty = console::Term::stderr().is_term();
@@ -74,38 +112,25 @@ pub(crate) async fn run_preflight(tests_total: usize) -> anyhow::Result<()> {
 
     if probes.is_empty() {
         // A `#[preflight]` that declares no probes is legal — render the
-        // result line so the operator can see the phase ran.
+        // result line so the operator can see the phase ran. Treat as
+        // "declared" so callers that key behaviour off declaration (e.g.
+        // `--preflight-only`'s success message) still get the same path
+        // as a passing run.
         println_via(&multi, is_tty, "preflight result: 0 passed");
-        return Ok(());
+        return Ok(PreflightOutcome {
+            declared: true,
+            results: Vec::new(),
+            passed: true,
+        });
     }
 
-    // Tier-1 disambiguation: error if any name collides. Done before any
-    // probe runs so an operator's mistake never wastes a second of probe
-    // budget.
-    if let Some(duplicate) = first_duplicate_name(&probes) {
-        return Err(anyhow!(
-            "cargo-rigtest: duplicate probe name {duplicate:?} in #[preflight] \
-             (tier-1 auto-disambiguation requires every name be unique; \
-             rename one of the colliding probes)"
-        ));
-    }
+    // Resolve display names through the full tiered disambiguation tree.
+    // Errors here are structural ("two custom probes with the same name",
+    // "exact duplicate probe"); they're operator mistakes that must abort
+    // before any probe is executed regardless of `--continue-on-...`.
+    let display_names = disambiguate_names(&probes)?;
 
-    // Pre-create one spinner per probe in declaration order so the TTY
-    // layout is deterministic regardless of which probe finishes first.
-    let spinner_style =
-        ProgressStyle::with_template("{spinner:.cyan} {msg}").expect("valid spinner template");
-    let spinners: Vec<ProgressBar> = probes
-        .iter()
-        .map(|p| {
-            let pb = multi.add(ProgressBar::new_spinner());
-            pb.set_style(spinner_style.clone());
-            pb.set_message(format!("{} {}", style("RUNNING").cyan().bold(), p.name));
-            if is_tty {
-                pb.enable_steady_tick(Duration::from_millis(80));
-            }
-            pb
-        })
-        .collect();
+    let spinners = build_spinners(&multi, &display_names, is_tty);
 
     let multi = Arc::new(multi);
 
@@ -113,21 +138,27 @@ pub(crate) async fn run_preflight(tests_total: usize) -> anyhow::Result<()> {
     // (lines therefore appear in completion order) so a slow probe never
     // blocks fast ones from being marked done in the live output.
     let suite_start = Instant::now();
-    let futures = probes.into_iter().zip(spinners).map(|(p, pb)| {
-        let multi = Arc::clone(&multi);
-        async move {
-            let start = Instant::now();
-            let outcome = run_probe(&p).await;
-            let elapsed = start.elapsed();
-            let line = render_probe_line(&p.name, &outcome, elapsed);
-            finalize_spinner(&multi, &pb, is_tty, &line);
-            ProbeResult {
-                probe: p,
-                outcome,
-                elapsed,
-            }
-        }
-    });
+    let futures =
+        probes
+            .into_iter()
+            .zip(spinners)
+            .zip(display_names)
+            .map(|((p, pb), display_name)| {
+                let multi = Arc::clone(&multi);
+                async move {
+                    let start = Instant::now();
+                    let outcome = run_probe(&p).await;
+                    let elapsed = start.elapsed();
+                    let line = render_probe_line(&display_name, &outcome, elapsed);
+                    finalize_spinner(&multi, &pb, is_tty, &line);
+                    ProbeResult {
+                        probe: p,
+                        outcome,
+                        elapsed,
+                        display_name,
+                    }
+                }
+            });
     let results: Vec<ProbeResult> = join_all(futures).await;
     let total_elapsed = suite_start.elapsed();
 
@@ -135,12 +166,12 @@ pub(crate) async fn run_preflight(tests_total: usize) -> anyhow::Result<()> {
         .iter()
         .filter(|r| matches!(r.outcome, ProbeOutcome::Passed))
         .count();
-    let failed: Vec<&ProbeResult> = results
+    let failed_count = results
         .iter()
         .filter(|r| matches!(r.outcome, ProbeOutcome::Failed(_)))
-        .collect();
+        .count();
 
-    if failed.is_empty() {
+    if failed_count == 0 {
         println_via(
             &multi,
             is_tty,
@@ -149,15 +180,53 @@ pub(crate) async fn run_preflight(tests_total: usize) -> anyhow::Result<()> {
                 total_elapsed.as_secs_f64()
             ),
         );
-        return Ok(());
+        return Ok(PreflightOutcome {
+            declared: true,
+            results,
+            passed: true,
+        });
     }
 
     render_readiness_table(&multi, is_tty, &results);
-    let failed = failed.len();
-    Err(anyhow!(
-        "{failed} probe{plural} failed — aborting suite ({tests_total} tests not run)",
-        plural = if failed == 1 { "" } else { "s" },
-    ))
+    Ok(PreflightOutcome {
+        declared: true,
+        results,
+        passed: false,
+    })
+}
+
+/// Convenience for `PreflightOutcome::failed` callers that want the same
+/// abort message the runner used to produce. Kept as a free function (not
+/// a method) so callers can compose it with extra context like the test
+/// count without forcing the runner to know about test counts.
+pub(crate) fn format_abort_message(failed_count: usize, tests_total: usize) -> String {
+    format!(
+        "{failed_count} probe{plural} failed — aborting suite ({tests_total} tests not run)",
+        plural = if failed_count == 1 { "" } else { "s" },
+    )
+}
+
+/// Pre-create one spinner per probe in declaration order so the TTY
+/// layout is deterministic regardless of which probe finishes first.
+fn build_spinners(
+    multi: &MultiProgress,
+    display_names: &[String],
+    is_tty: bool,
+) -> Vec<ProgressBar> {
+    let spinner_style =
+        ProgressStyle::with_template("{spinner:.cyan} {msg}").expect("valid spinner template");
+    display_names
+        .iter()
+        .map(|name| {
+            let pb = multi.add(ProgressBar::new_spinner());
+            pb.set_style(spinner_style.clone());
+            pb.set_message(format!("{} {}", style("RUNNING").cyan().bold(), name));
+            if is_tty {
+                pb.enable_steady_tick(Duration::from_millis(80));
+            }
+            pb
+        })
+        .collect()
 }
 
 /// Print the readiness table (every probe, status, timing, error) in
@@ -181,7 +250,7 @@ fn render_readiness_table(multi: &MultiProgress, is_tty: bool, results: &[ProbeR
             &format!(
                 "  {status} [{:.3}s] {}{detail}",
                 r.elapsed.as_secs_f64(),
-                r.probe.name,
+                r.display_name,
             ),
         );
     }
@@ -228,14 +297,75 @@ fn println_via(multi: &MultiProgress, is_tty: bool, line: &str) {
     }
 }
 
-fn first_duplicate_name(probes: &[Probe]) -> Option<&str> {
-    let mut seen: HashSet<&str> = HashSet::with_capacity(probes.len());
+/// Resolve display names for every probe through the four-tier
+/// disambiguation tree:
+///
+/// - **Tier 1** — name unique → use `name`.
+/// - **Tier 2** — same name across different probe *types* → `name(type)`.
+/// - **Tier 3** — same name within the same type → `name(type[target])`,
+///   where `target` is the operator-visible parameter (host:port for TCP,
+///   host for DNS, URL for HTTP, dest for SSH, variable name for env).
+///   `custom` probes have no inspectable target — a collision among
+///   `custom` probes with the same name is an operator mistake and
+///   returns an error.
+/// - **Tier 4** — name *and* type *and* target all identical → genuine
+///   duplicate, returns an error.
+///
+/// Returns a `Vec<String>` aligned 1:1 with `probes` so the caller can
+/// use the same names for both human-readable output and `JUnit`
+/// `<testcase name=...>` attributes.
+pub(crate) fn disambiguate_names(probes: &[Probe]) -> anyhow::Result<Vec<String>> {
+    // Count occurrences of every (name, type) and (name, type, target)
+    // triple up front so the per-probe decision is a few lookups.
+    let mut by_name: HashMap<&str, usize> = HashMap::new();
+    let mut by_name_type: HashMap<(&str, &'static str), usize> = HashMap::new();
+    let mut by_name_type_target: HashMap<(&str, &'static str, String), usize> = HashMap::new();
+
     for p in probes {
-        if !seen.insert(p.name.as_ref()) {
-            return Some(p.name.as_ref());
+        let name = p.name.as_ref();
+        *by_name.entry(name).or_default() += 1;
+        let ty = p.kind.type_tag();
+        *by_name_type.entry((name, ty)).or_default() += 1;
+        if let Some(t) = p.kind.natural_target() {
+            *by_name_type_target
+                .entry((name, ty, t.to_string()))
+                .or_default() += 1;
         }
     }
-    None
+
+    let mut out = Vec::with_capacity(probes.len());
+    for p in probes {
+        let name = p.name.as_ref();
+        let ty = p.kind.type_tag();
+        let name_count = by_name.get(name).copied().unwrap_or(0);
+        if name_count == 1 {
+            out.push(name.to_string());
+            continue;
+        }
+        let type_count = by_name_type.get(&(name, ty)).copied().unwrap_or(0);
+        if type_count == 1 {
+            out.push(format!("{name}({ty})"));
+            continue;
+        }
+        // Tier 3+ — within-type collision. `custom` has no target so the
+        // only remedy is renaming; surface that explicitly.
+        let Some(target) = p.kind.natural_target() else {
+            return Err(anyhow!(
+                "duplicate custom probe {name:?} — give each custom probe a unique name",
+            ));
+        };
+        let triple_count = by_name_type_target
+            .get(&(name, ty, target.to_string()))
+            .copied()
+            .unwrap_or(0);
+        if triple_count == 1 {
+            out.push(format!("{name}({ty}[{target}])"));
+            continue;
+        }
+        // Tier 4 — name + type + target all identical. Genuine duplicate.
+        return Err(anyhow!("duplicate probe: {name}({ty}[{target}])"));
+    }
+    Ok(out)
 }
 
 /// Dispatch a probe and apply the per-probe timeout.
@@ -459,16 +589,140 @@ mod tests {
     use super::*;
     use crate::preflight::Preflight;
 
+    // ── Disambiguation tier-by-tier coverage ─────────────────────────────
+    //
+    // The disambiguator decides how each probe is named in both the human
+    // readiness table and the JUnit `<testcase name=...>` attribute, so we
+    // exercise every tier explicitly: a regression here changes the names
+    // CI dashboards expect across both surfaces.
+
     #[test]
-    fn duplicate_detection_finds_first_collision() {
-        let p = Preflight::new().tcp("api", "1.2.3.4:1").env("api", "X");
-        assert_eq!(first_duplicate_name(&p.into_probes()), Some("api"));
+    fn tier1_unique_names_pass_through_verbatim() {
+        let p = Preflight::new().tcp("a", "1.2.3.4:1").env("b", "X");
+        let names = disambiguate_names(&p.into_probes()).unwrap();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
-    fn duplicate_detection_returns_none_for_unique() {
-        let p = Preflight::new().tcp("a", "1.2.3.4:1").env("b", "X");
-        assert!(first_duplicate_name(&p.into_probes()).is_none());
+    fn tier2_collision_across_types_appends_type_tag() {
+        let p = Preflight::new().tcp("api", "1.2.3.4:1").env("api", "X");
+        let names = disambiguate_names(&p.into_probes()).unwrap();
+        assert_eq!(names, vec!["api(tcp)".to_string(), "api(env)".to_string()]);
+    }
+
+    #[test]
+    fn tier3_collision_within_tcp_appends_target() {
+        let p = Preflight::new()
+            .tcp("api", "1.2.3.4:1")
+            .tcp("api", "1.2.3.4:2");
+        let names = disambiguate_names(&p.into_probes()).unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "api(tcp[1.2.3.4:1])".to_string(),
+                "api(tcp[1.2.3.4:2])".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn tier3_collision_within_dns_appends_host() {
+        let p = Preflight::new()
+            .dns("dns", "a.example.com")
+            .dns("dns", "b.example.com");
+        let names = disambiguate_names(&p.into_probes()).unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "dns(dns[a.example.com])".to_string(),
+                "dns(dns[b.example.com])".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn tier3_collision_within_env_appends_var() {
+        let p = Preflight::new().env("e", "HOME").env("e", "PATH");
+        let names = disambiguate_names(&p.into_probes()).unwrap();
+        assert_eq!(
+            names,
+            vec!["e(env[HOME])".to_string(), "e(env[PATH])".to_string()],
+        );
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn tier3_collision_within_http_appends_url() {
+        let p = Preflight::new()
+            .http("api", "http://a.example.com/")
+            .http("api", "http://b.example.com/");
+        let names = disambiguate_names(&p.into_probes()).unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "api(http[http://a.example.com/])".to_string(),
+                "api(http[http://b.example.com/])".to_string(),
+            ],
+        );
+    }
+
+    #[cfg(all(feature = "ssh-client", unix))]
+    #[test]
+    fn tier3_collision_within_ssh_appends_dest() {
+        let p = Preflight::new()
+            .ssh("ssh", "deploy@a")
+            .ssh("ssh", "deploy@b");
+        let names = disambiguate_names(&p.into_probes()).unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "ssh(ssh[deploy@a])".to_string(),
+                "ssh(ssh[deploy@b])".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn tier3_custom_collision_is_an_error() {
+        // `custom` probes have no inspectable target — the only fix is a
+        // rename, which the message must say explicitly.
+        let p = Preflight::new()
+            .custom("c", || async { Ok(()) })
+            .custom("c", || async { Ok(()) });
+        let err = disambiguate_names(&p.into_probes())
+            .expect_err("two custom probes with the same name must error");
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate custom probe"), "got {msg}");
+        assert!(msg.contains("unique name"), "got {msg}");
+    }
+
+    #[test]
+    fn tier4_identical_name_type_target_is_an_error() {
+        let p = Preflight::new()
+            .tcp("api", "1.2.3.4:1")
+            .tcp("api", "1.2.3.4:1");
+        let err = disambiguate_names(&p.into_probes())
+            .expect_err("two probes with identical name+type+target must error");
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate probe"), "got {msg}");
+        assert!(msg.contains("api(tcp[1.2.3.4:1])"), "got {msg}");
+    }
+
+    #[test]
+    fn three_way_name_collision_across_types_all_disambiguated() {
+        let p = Preflight::new()
+            .tcp("x", "1.2.3.4:1")
+            .env("x", "X")
+            .dns("x", "example.com");
+        let names = disambiguate_names(&p.into_probes()).unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "x(tcp)".to_string(),
+                "x(env)".to_string(),
+                "x(dns)".to_string(),
+            ],
+        );
     }
 
     #[tokio::test]

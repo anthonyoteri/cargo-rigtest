@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::junit::{JunitConfig, JunitReporter};
-use crate::preflight_runner::run_preflight;
+use crate::preflight_runner::{format_abort_message, run_preflight, PreflightOutcome};
 use crate::protocol::SubprocessOutcome;
 use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_PREFLIGHT, RIG_TEST_CASES};
 use crate::reporter::{
@@ -31,6 +31,75 @@ impl std::fmt::Display for PreflightAbort {
 }
 
 impl std::error::Error for PreflightAbort {}
+
+/// Result of [`handle_preflight_phase`] — either continue into the test
+/// phase or bail with a populated [`PreflightAbort`].
+enum ControlFlow {
+    Continue,
+    Abort(anyhow::Error),
+}
+
+/// Run preflight as part of a normal suite run, plumb results into the
+/// reporter, and decide whether the run should continue. Encapsulated so
+/// `run` stays under the pedantic 100-line ceiling.
+async fn handle_preflight_phase(
+    args: &RuntimeArgs,
+    reporter: &Arc<MultiReporter>,
+) -> anyhow::Result<ControlFlow> {
+    let preflight_outcome = if args.no_preflight {
+        PreflightOutcome::none()
+    } else {
+        match run_preflight().await {
+            Ok(outcome) => outcome,
+            Err(e) => return Err(anyhow::Error::new(PreflightAbort(e.to_string()))),
+        }
+    };
+
+    if preflight_outcome.declared && !preflight_outcome.results.is_empty() {
+        reporter.preflight_recorded(&preflight_outcome.results);
+    }
+
+    if !preflight_outcome.passed && !args.continue_on_preflight_failure {
+        let failed_count = preflight_outcome
+            .results
+            .iter()
+            .filter(|r| matches!(r.outcome, crate::preflight_runner::ProbeOutcome::Failed(_)))
+            .count();
+        // Still let the JUnit reporter flush — otherwise the preflight
+        // testsuite we just recorded would never reach disk.
+        let _ = reporter.finish(0, 0, 0, Duration::ZERO);
+        return Ok(ControlFlow::Abort(anyhow::Error::new(PreflightAbort(
+            format_abort_message(failed_count, RIG_TEST_CASES.len()),
+        ))));
+    }
+
+    Ok(ControlFlow::Continue)
+}
+
+/// Handle `--preflight-only`: run the readiness check (when one is
+/// declared) and exit with the right code. Skips both `#[global_setup]`
+/// and the test phase by design.
+async fn handle_preflight_only(args: &RuntimeArgs) -> anyhow::Result<()> {
+    if args.no_preflight || RIG_PREFLIGHT.is_empty() {
+        println!("no preflight declared");
+        return Ok(());
+    }
+    let outcome = run_preflight()
+        .await
+        .map_err(|e| anyhow::Error::new(PreflightAbort(e.to_string())))?;
+    if outcome.passed {
+        return Ok(());
+    }
+    let failed_count = outcome
+        .results
+        .iter()
+        .filter(|r| matches!(r.outcome, crate::preflight_runner::ProbeOutcome::Failed(_)))
+        .count();
+    Err(anyhow::Error::new(PreflightAbort(format_abort_message(
+        failed_count,
+        RIG_TEST_CASES.len(),
+    ))))
+}
 
 fn classify_failed(stderr: &str) -> ReportOutcome {
     if stderr.contains("panicked at") {
@@ -410,15 +479,12 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
 
     let reporter = Arc::new(build_reporter(&args, seed)?);
 
-    // Preflight runs before global_setup. If --no-preflight is set or no
-    // #[preflight] is declared this is a no-op. On failure the function
-    // returns an error and we wrap it in `PreflightAbort` so run_main can
-    // translate the suite-level exit code into 2.
-    if !args.no_preflight {
-        let tests_total = RIG_TEST_CASES.len();
-        if let Err(e) = run_preflight(tests_total).await {
-            return Err(anyhow::Error::new(PreflightAbort(e.to_string())));
-        }
+    if args.preflight_only {
+        return handle_preflight_only(&args).await;
+    }
+
+    if let ControlFlow::Abort(err) = handle_preflight_phase(&args, &reporter).await? {
+        return Err(err);
     }
 
     let global_setup = RIG_GLOBAL_SETUP.first();

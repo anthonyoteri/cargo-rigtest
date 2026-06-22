@@ -42,6 +42,7 @@ enum RigCommand {
 }
 
 #[derive(Parser, Debug)]
+#[allow(clippy::struct_excessive_bools)] // CLI flags; not state to model.
 struct RunArgs {
     /// Maximum parallel test jobs [default: number of CPUs]
     #[arg(short, long)]
@@ -88,6 +89,22 @@ struct RunArgs {
     /// to catch missing environment dependencies *before* tests run.
     #[arg(long)]
     no_preflight: bool,
+
+    /// Run the preflight phase, print the readiness table, and exit
+    /// without running `#[global_setup]` or any tests. Exits 0 when every
+    /// declared probe passes, 2 when any probe fails. When no
+    /// `#[preflight]` is declared the binary prints `no preflight
+    /// declared` and exits 0.
+    #[arg(long)]
+    preflight_only: bool,
+
+    /// Treat preflight failures as warnings rather than aborting the
+    /// suite. The readiness table and `JUnit` preflight testsuite still
+    /// show the failures; the final exit code reflects only the test
+    /// phase. Combine with `--reporter junit` to publish probe results
+    /// to CI dashboards regardless of suite outcome.
+    #[arg(long)]
+    continue_on_preflight_failure: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -208,6 +225,12 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         }
         if args.no_preflight {
             test_cmd.arg("--no-preflight");
+        }
+        if args.preflight_only {
+            test_cmd.arg("--preflight-only");
+        }
+        if args.continue_on_preflight_failure {
+            test_cmd.arg("--continue-on-preflight-failure");
         }
         if let Some(paths) = &junit {
             test_cmd.args(["--reporter", "junit"]);

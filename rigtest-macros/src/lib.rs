@@ -800,18 +800,27 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// declared probe fails, the coordinator prints a readiness table, exits
 /// with status `2`, and skips both `#[global_setup]` and `#[global_teardown]`.
 ///
-/// # Signature
+/// # Signatures
 ///
-/// `#[preflight]` accepts the signature:
+/// `#[preflight]` accepts two signatures:
 ///
 /// ```text
 /// fn name() -> Preflight { ... }
+/// fn name(env: &str) -> Preflight { ... }
 /// ```
 ///
-/// `async fn`, additional parameters, and return types other than
-/// `Preflight` are rejected at compile time with an actionable message.
+/// In the 1-arg form the framework passes the active profile name as a
+/// `&str`, sourced from the `RIGTEST_PROFILE` environment variable
+/// (defaulting to the empty string when unset). The parameter type must
+/// be exactly `&str` — `String`, `&String`, `Cow<'_, str>`, and
+/// `&mut str` are rejected at compile time.
 ///
-/// # Example
+/// `async fn`, more than one parameter, and return types other than
+/// `Preflight` are rejected with actionable messages.
+///
+/// # Examples
+///
+/// 0-arg form:
 ///
 /// ```ignore
 /// use rigtest::Preflight;
@@ -825,6 +834,27 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///         .env("home_set", "HOME")
 /// }
 /// ```
+///
+/// 1-arg form branching on profile:
+///
+/// ```ignore
+/// use rigtest::Preflight;
+///
+/// #[rigtest::preflight]
+/// fn preflight(env: &str) -> Preflight {
+///     match env {
+///         "prod" => Preflight::new().http("api", "https://api.prod.example.com/health"),
+///         _ => Preflight::new().http("api", "https://api.staging.example.com/health"),
+///     }
+/// }
+/// ```
+///
+/// # Rejected shapes
+///
+/// The following shapes are rejected at compile time with an actionable
+/// message: parameter types other than exactly `&str` (`String`,
+/// `&String`, `&mut str`, `Cow<'_, str>`); more than one parameter; an
+/// `async fn`; a missing or non-`Preflight` return type.
 #[proc_macro_attribute]
 pub fn preflight(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand_preflight(attr, item) {
@@ -848,16 +878,30 @@ fn expand_preflight(attr: TokenStream, item: TokenStream) -> Result<TokenStream,
         return Err(syn::Error::new_spanned(
             func.sig.asyncness,
             "#[preflight] functions must be synchronous (the framework runs probes; the \
-             builder function only constructs the Preflight description)",
+             builder function only constructs the Preflight description). Expected one of:\n  \
+             fn name() -> Preflight\n  fn name(env: &str) -> Preflight",
         ));
     }
 
-    if !func.sig.inputs.is_empty() {
-        return Err(syn::Error::new_spanned(
-            &func.sig.inputs,
-            "#[preflight] functions must take no arguments",
-        ));
-    }
+    // Accept exactly 0 or 1 parameters. The 1-arg form must be `&str`
+    // (exact match — `String`, `&String`, `Cow<'_, str>`, `&mut str` are
+    // rejected so a slip in the signature does not silently bind the wrong
+    // type to the active profile name).
+    let takes_profile = match func.sig.inputs.len() {
+        0 => false,
+        1 => {
+            let arg = func.sig.inputs.first().expect("len == 1");
+            validate_preflight_param(arg)?;
+            true
+        }
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &func.sig.inputs,
+                "#[preflight] functions accept at most one parameter. Expected one of:\n  \
+                 fn name() -> Preflight\n  fn name(env: &str) -> Preflight",
+            ));
+        }
+    };
 
     // Insist on an explicit `-> Preflight` return type. We deliberately
     // match by trailing path segment so both `Preflight` and the fully
@@ -889,15 +933,67 @@ fn expand_preflight(attr: TokenStream, item: TokenStream) -> Result<TokenStream,
         Span::call_site(),
     );
 
+    // The registry stores `fn(&str) -> Preflight`. For the 0-arg form we
+    // emit a thin adapter that discards the profile argument; for the
+    // 1-arg form we register the user's function directly.
+    let adapter = if takes_profile {
+        quote! { #func_ident }
+    } else {
+        quote! { (|_profile: &::core::primitive::str| #func_ident()) as fn(&::core::primitive::str) -> ::rigtest::Preflight }
+    };
+
     let expanded = quote! {
         #func
 
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_PREFLIGHT)]
         #[linkme(crate = ::rigtest::__linkme)]
         static #static_ident: ::rigtest::registry::PreflightEntry =
-            ::rigtest::registry::PreflightEntry::new(#func_ident);
+            ::rigtest::registry::PreflightEntry::new(#adapter);
     };
     Ok(TokenStream::from(expanded))
+}
+
+/// Validate that the single parameter on a 1-arg `#[preflight]` is exactly
+/// `&str` — not `&mut str`, `String`, `&String`, `Cow<'_, str>`, or anything
+/// else.
+fn validate_preflight_param(arg: &FnArg) -> Result<(), syn::Error> {
+    let FnArg::Typed(pat_type) = arg else {
+        return Err(syn::Error::new_spanned(
+            arg,
+            "#[preflight] functions must not have a `self` parameter. Expected:\n  \
+             fn name(env: &str) -> Preflight",
+        ));
+    };
+    if param_is_str_ref(&pat_type.ty) {
+        Ok(())
+    } else {
+        Err(syn::Error::new_spanned(
+            &pat_type.ty,
+            "#[preflight] parameter must be `&str` exactly (not `String`, `&String`, \
+             `&mut str`, or `Cow<'_, str>`). Expected one of:\n  \
+             fn name() -> Preflight\n  fn name(env: &str) -> Preflight",
+        ))
+    }
+}
+
+/// Returns true when `ty` is `&str` (with any or no lifetime, shared
+/// reference only). Rejects `&mut str`, `String`, `Cow<'_, str>`, and any
+/// other shape so a typo cannot silently bind a different type to the
+/// active profile name.
+fn param_is_str_ref(ty: &Type) -> bool {
+    let Type::Reference(r) = ty else {
+        return false;
+    };
+    if r.mutability.is_some() {
+        return false;
+    }
+    let Type::Path(tp) = r.elem.as_ref() else {
+        return false;
+    };
+    if tp.qself.is_some() {
+        return false;
+    }
+    tp.path.get_ident().is_some_and(|ident| ident == "str")
 }
 
 /// Returns true when `ty` is `Preflight` or a path ending in `::Preflight`.
