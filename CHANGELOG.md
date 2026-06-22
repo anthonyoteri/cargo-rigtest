@@ -5,6 +5,25 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.5.0](https://github.com/anthonyoteri/cargo-rigtest/compare/edf46bd28ab27fe24def611b68af412b52607aa0..v0.5.0) - 2026-06-22
+#### Features
+- (**macros**) add #[case] attribute for table-driven parametrized tests - ([6acc719](https://github.com/anthonyoteri/cargo-rigtest/commit/6acc719779a4bc5470d1f15494e7398b490dc2f3)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) preflight polish — profile parameter, disambiguation, JUnit, advanced CLI flags - ([bda3592](https://github.com/anthonyoteri/cargo-rigtest/commit/bda3592503b053e3953d33bbced35729718ae52c)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) add dns/http/ssh/custom preflight probes with configurator reuse - ([bb544ef](https://github.com/anthonyoteri/cargo-rigtest/commit/bb544ef8f85ea2e2e2ae8e5e574f155c5d3e0ed9)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) add #[preflight] macro and Preflight builder - ([7599ff8](https://github.com/anthonyoteri/cargo-rigtest/commit/7599ff86bbaf9702118872d5baa1fa298704e7ad)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) add tags attribute and --tag/--not-tag CLI filters - ([a0c9aef](https://github.com/anthonyoteri/cargo-rigtest/commit/a0c9aefaaa7040bec4032aeb40633b9b0a2fb103)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Documentation
+- (**adr**) record process-isolation and linkme-registration decisions - ([2a08a2c](https://github.com/anthonyoteri/cargo-rigtest/commit/2a08a2cf375917dc020a18570dca4ff223766723)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**contributing**) document AI-assisted contribution policy - ([fba8716](https://github.com/anthonyoteri/cargo-rigtest/commit/fba8716a6edfd53d89585e041fb5927358bb1cc2)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**readme**) update feature table to reflect current feature set - ([e2978ac](https://github.com/anthonyoteri/cargo-rigtest/commit/e2978acc32222a5af74386e1d109f1898a838d60)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**readme**) split per-crate READMEs from monolithic top-level - ([2e65360](https://github.com/anthonyoteri/cargo-rigtest/commit/2e65360a31e4016341d5bee8ba7c109652b42d6d)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- add project glossary and preflight design ADR - ([c24ebb7](https://github.com/anthonyoteri/cargo-rigtest/commit/c24ebb7ca610b64fb2bc708d56e2d9c697299a79)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- add AGENTS.md with CLAUDE.md symlink - ([322d1e8](https://github.com/anthonyoteri/cargo-rigtest/commit/322d1e8b7cbc98362ef49843445c21ab66230d79)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Refactoring
+- ![BREAKING](https://img.shields.io/badge/BREAKING-red) (**api**) mark public structs non_exhaustive - ([edf46bd](https://github.com/anthonyoteri/cargo-rigtest/commit/edf46bd28ab27fe24def611b68af412b52607aa0)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.4.0](https://github.com/anthonyoteri/cargo-rigtest/compare/41bd2cec6699f4d3a7b9606f83c63722818f9c34..v0.4.0) - 2026-06-10
 #### Features
 - (**reporter**) add --reporter junit for JUnit XML output - ([41bd2ce](https://github.com/anthonyoteri/cargo-rigtest/commit/41bd2cec6699f4d3a7b9606f83c63722818f9c34)) - [@anthonyoteri](https://github.com/anthonyoteri)

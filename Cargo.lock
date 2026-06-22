@@ -127,7 +127,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "calculator"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rigtest",
  "serde",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-rigtest"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "rigtest"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "rigtest-example-basic"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rigtest",
  "serde",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "rigtest-example-http-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "reqwest",
  "rigtest",
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "rigtest-example-ssh-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rigtest",
  "serde",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "rigtest-macros"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
