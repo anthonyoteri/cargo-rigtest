@@ -37,20 +37,15 @@ fn preflight_macro_invokes_user_builder() {
 
     assert_eq!(probes[0].name, "local_loopback_closed_port");
     assert!(matches!(
-        probes[0].kind,
-        ProbeKind::Tcp {
-            target: "127.0.0.1:1"
-        }
+        &probes[0].kind,
+        ProbeKind::Tcp { target } if target == "127.0.0.1:1"
     ));
-    assert_eq!(probes[0].timeout, Duration::from_millis(50));
+    assert_eq!(probes[0].timeout, Some(Duration::from_millis(50)));
 
     assert_eq!(probes[1].name, "path_is_set");
     assert!(matches!(
-        probes[1].kind,
-        ProbeKind::Env {
-            var: "PATH",
-            expected: None
-        }
+        &probes[1].kind,
+        ProbeKind::Env { var, expected: None } if var == "PATH"
     ));
 }
 
@@ -58,7 +53,7 @@ fn preflight_macro_invokes_user_builder() {
 fn preflight_macro_records_declaration_order() {
     let entry = &RIG_PREFLIGHT[0];
     let p = (entry.build_fn)();
-    let names: Vec<&str> = p.probes().iter().map(|p| p.name).collect();
+    let names: Vec<&str> = p.probes().iter().map(|p| p.name.as_ref()).collect();
     assert_eq!(names, vec!["local_loopback_closed_port", "path_is_set"]);
 }
 

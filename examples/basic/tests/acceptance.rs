@@ -5,9 +5,27 @@ use std::sync::Arc;
 // A preflight that verifies the environment carries the basics every
 // shell-launched test depends on. `HOME` is set in every supported CI
 // environment, so this probe passes deterministically.
+//
+// We also demonstrate `.custom(...)` — the escape hatch for checks the
+// six named primitives don't cover. The check below verifies that we
+// can resolve a hostname via `tokio::net::lookup_host`; for a real
+// suite a custom probe might dial a Kafka cluster, validate an MX
+// record, or call a status endpoint with a non-GET method.
 #[preflight]
 fn checks() -> Preflight {
-    Preflight::new().env("home_is_set", "HOME")
+    Preflight::new()
+        .env("home_is_set", "HOME")
+        .custom("lookup_localhost", || async {
+            // Resolve `localhost:0` — the port is a placeholder; we only
+            // care that at least one address comes back. Demonstrates
+            // that `.custom` accepts any async work returning a
+            // `Result<(), Box<dyn Error + Send + Sync>>`.
+            let mut addrs = tokio::net::lookup_host("localhost:0").await?;
+            if addrs.next().is_none() {
+                return Err("localhost resolved to no addresses".into());
+            }
+            Ok(())
+        })
 }
 
 #[derive(Serialize, Deserialize)]
