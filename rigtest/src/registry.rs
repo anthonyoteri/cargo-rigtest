@@ -200,7 +200,11 @@ unsafe impl Sync for GlobalTeardownEntry {}
 pub struct PreflightEntry {
     /// Calls the user's `#[preflight]` function and returns the declared
     /// [`Preflight`][crate::preflight::Preflight].
-    pub build_fn: fn() -> crate::preflight::Preflight,
+    ///
+    /// Always takes the active profile name as its single argument; the
+    /// `#[preflight]` macro emits a thin adapter for the 0-arg form that
+    /// discards the value.
+    pub build_fn: fn(&str) -> crate::preflight::Preflight,
 }
 
 impl PreflightEntry {
@@ -208,7 +212,7 @@ impl PreflightEntry {
     /// `#[preflight]` proc macro; not part of the stable public API.
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(build_fn: fn() -> crate::preflight::Preflight) -> Self {
+    pub const fn new(build_fn: fn(&str) -> crate::preflight::Preflight) -> Self {
         Self { build_fn }
     }
 }

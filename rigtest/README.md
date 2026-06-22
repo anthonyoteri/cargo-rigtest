@@ -203,9 +203,31 @@ fn preflight() -> Preflight {
 }
 ```
 
-`#[preflight]` accepts the signature `fn() -> Preflight`. `async`,
-additional parameters, and return types other than `Preflight` are
-rejected at compile time.
+`#[preflight]` accepts two signatures:
+
+```rust
+fn checks() -> Preflight { /* ... */ }
+fn checks(env: &str) -> Preflight { /* ... */ }
+```
+
+In the 1-arg form the framework supplies the active profile name as the
+`&str` argument so a single declaration can branch on environment:
+
+```rust
+#[rigtest::preflight]
+fn checks(env: &str) -> Preflight {
+    match env {
+        "prod" => Preflight::new().http("api", "https://api.prod.example.com/health"),
+        _ => Preflight::new().http("api", "https://api.staging.example.com/health"),
+    }
+}
+```
+
+The profile is sourced from the `RIGTEST_PROFILE` environment variable,
+defaulting to the empty string when unset. The parameter type must be
+exactly `&str` — `String`, `&String`, `Cow<'_, str>`, more than one
+parameter, `async fn`, and return types other than `Preflight` are
+rejected at compile time with an actionable message.
 
 #### Probe primitives
 
@@ -254,8 +276,24 @@ any other kind.
 SSH probe. The probe still requires exit status 0; only the command run
 on the remote host changes. No-op on probes of any other kind.
 
-Probe names must be unique within a single `#[preflight]` — a collision
-is reported at coordinator startup before any probe runs.
+#### Auto-disambiguation
+
+Probe names are resolved through a four-tier scheme so the same `name`
+can appear more than once when it remains unambiguous in context. The
+resolved name shows up in both the human readiness table and the JUnit
+`<testcase name=...>` attribute:
+
+- **Tier 1** — name unique → use `name` verbatim.
+- **Tier 2** — same name across different probe *types* → `name(type)`
+  (e.g. `api(tcp)` vs `api(http)`).
+- **Tier 3** — same name within the same type → `name(type[target])`
+  using the probe's natural target (`host:port` for TCP, `host` for
+  DNS, `url` for HTTP, `dest` for SSH, variable name for env).
+- **Tier 4** — name, type, and target all identical → genuine
+  duplicate, reported as a startup error before any probe runs.
+
+`custom` probes have no inspectable target — colliding `custom` names
+must be renamed; the framework reports that explicitly.
 
 > **Skipping preflight.** Pass `--no-preflight` to `cargo rigtest run` to
 > skip the entire phase for one run. This is intended for local debugging,

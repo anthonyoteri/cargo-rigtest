@@ -41,6 +41,23 @@ struct State {
     in_flight: HashMap<(String, String), CaseProgress>,
     /// Cases whose terminal event has fired.
     finalized: Vec<TestCase>,
+    /// Per-probe records captured from the preflight phase, used to emit
+    /// a synthetic `<testsuite name="preflight">` ahead of the regular
+    /// test suite. Empty when no `#[preflight]` ran.
+    preflight_cases: Vec<PreflightCase>,
+}
+
+/// A finalized preflight probe ready to be serialized into a `JUnit`
+/// `<testcase>` element. Captured at runtime so the `JUnit` shape stays
+/// consistent regardless of how the run exits (passing, failing, or
+/// continuing past failures).
+struct PreflightCase {
+    /// Disambiguated display name shared with the human-readable output.
+    name: String,
+    /// `Some(reason)` when the probe failed, `None` when it passed.
+    failure: Option<String>,
+    /// Probe runtime, surfaced as the testcase `time` attribute.
+    duration: Duration,
 }
 
 struct CaseProgress {
@@ -79,6 +96,18 @@ impl JunitReporter {
     fn build_report(&self, suite_time: Duration) -> Report {
         let state = lock(&self.state);
 
+        let mut report = Report::new(self.config.suite_name.clone());
+
+        // The synthetic preflight testsuite is emitted *before* the regular
+        // test testsuite so CI dashboards that iterate suites in document
+        // order see "environment readiness" first. We only emit it when at
+        // least one probe was captured — when no preflight ran, the
+        // testsuite is absent entirely so consumers can distinguish "no
+        // preflight declared" from "preflight ran and everything passed".
+        if !state.preflight_cases.is_empty() {
+            report.add_test_suite(build_preflight_suite(&state.preflight_cases));
+        }
+
         let mut suite = TestSuite::new(self.config.suite_name.clone());
         if let Some(ts) = state.suite_started_at {
             suite.set_timestamp(ts);
@@ -105,7 +134,6 @@ impl JunitReporter {
             suite.add_test_case(case);
         }
 
-        let mut report = Report::new(self.config.suite_name.clone());
         report.add_test_suite(suite);
         report
     }
@@ -181,6 +209,31 @@ fn outcome_type(outcome: Outcome) -> &'static str {
         Outcome::Timeout => "timeout",
         Outcome::Crash => "crash",
     }
+}
+
+/// Build the synthetic `<testsuite name="preflight">` element from the
+/// captured probe records. Failed probes carry a `<failure>` child with
+/// the probe's error message; passing probes have no child element.
+fn build_preflight_suite(cases: &[PreflightCase]) -> TestSuite {
+    let mut suite = TestSuite::new("preflight");
+    let total_time: Duration = cases.iter().map(|c| c.duration).sum();
+    suite.set_time(total_time);
+    for case in cases {
+        let status = match &case.failure {
+            None => TestCaseStatus::success(),
+            Some(reason) => {
+                let mut s = TestCaseStatus::non_success(NonSuccessKind::Failure);
+                s.set_message(reason.clone());
+                s.set_type("preflight");
+                s
+            }
+        };
+        let mut tc = TestCase::new(case.name.clone(), status);
+        tc.set_classname("preflight");
+        tc.set_time(case.duration);
+        suite.add_test_case(tc);
+    }
+    suite
 }
 
 fn make_rerun(attempt: &AttemptRecord) -> TestRerun {
@@ -307,6 +360,21 @@ impl TestEventReporter for JunitReporter {
     }
 
     fn print_phase(&self, _label: &str) {}
+
+    fn preflight_recorded(&self, results: &[crate::preflight_runner::ProbeResult]) {
+        use crate::preflight_runner::ProbeOutcome;
+        let mut state = lock(&self.state);
+        for r in results {
+            state.preflight_cases.push(PreflightCase {
+                name: r.display_name.clone(),
+                failure: match &r.outcome {
+                    ProbeOutcome::Passed => None,
+                    ProbeOutcome::Failed(reason) => Some(reason.clone()),
+                },
+                duration: r.elapsed,
+            });
+        }
+    }
 
     fn finish(
         &self,
@@ -604,6 +672,115 @@ mod tests {
         r.test_passed(tref("t", "acceptance"), Duration::from_millis(1));
         let xml = r.write(Duration::from_secs(1)).unwrap();
         assert!(xml.contains("hostname="), "xml: {xml}");
+    }
+
+    // ── Preflight synthetic testsuite ────────────────────────────────────
+
+    fn make_probe_result(
+        name: &str,
+        outcome: crate::preflight_runner::ProbeOutcome,
+        elapsed: Duration,
+    ) -> crate::preflight_runner::ProbeResult {
+        use crate::preflight::{Preflight, Probe};
+        // Build a real Probe to satisfy the ProbeResult struct — the JUnit
+        // path only ever inspects display_name, outcome, and elapsed, so
+        // the kind we choose is immaterial.
+        let pre = Preflight::new().env(name.to_string(), "X");
+        let probes: Vec<Probe> = pre.into_probes();
+        let probe = probes.into_iter().next().unwrap();
+        crate::preflight_runner::ProbeResult {
+            probe,
+            outcome,
+            elapsed,
+            display_name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn no_preflight_recorded_emits_no_preflight_testsuite() {
+        // When `preflight_recorded` is never called the JUnit document
+        // must not contain a preflight testsuite at all so consumers can
+        // distinguish "no preflight declared" from "preflight ran".
+        let tmp = TempDir::new().unwrap();
+        let r = JunitReporter::new(cfg(&tmp));
+        r.test_started(tref("t", "acceptance"));
+        r.test_passed(tref("t", "acceptance"), Duration::from_millis(1));
+        let xml = r.write(Duration::from_secs(1)).unwrap();
+        assert!(!xml.contains("name=\"preflight\""), "xml: {xml}");
+    }
+
+    #[test]
+    fn passing_preflight_emits_synthetic_testsuite_with_no_failures() {
+        use crate::preflight_runner::ProbeOutcome;
+        let tmp = TempDir::new().unwrap();
+        let r = JunitReporter::new(cfg(&tmp));
+        let results = vec![
+            make_probe_result("home", ProbeOutcome::Passed, Duration::from_millis(2)),
+            make_probe_result("path", ProbeOutcome::Passed, Duration::from_millis(3)),
+        ];
+        r.preflight_recorded(&results);
+        r.test_started(tref("t", "acceptance"));
+        r.test_passed(tref("t", "acceptance"), Duration::from_millis(1));
+        let xml = r.write(Duration::from_secs(1)).unwrap();
+        assert!(xml.contains("name=\"preflight\""), "xml: {xml}");
+        assert!(xml.contains("name=\"home\""));
+        assert!(xml.contains("name=\"path\""));
+        assert!(
+            !xml.contains("<failure"),
+            "passing preflight must not produce <failure>: {xml}"
+        );
+    }
+
+    #[test]
+    fn failing_preflight_emits_failure_element_with_reason() {
+        use crate::preflight_runner::ProbeOutcome;
+        let tmp = TempDir::new().unwrap();
+        let r = JunitReporter::new(cfg(&tmp));
+        let results = vec![
+            make_probe_result("ok", ProbeOutcome::Passed, Duration::from_millis(2)),
+            make_probe_result(
+                "down",
+                ProbeOutcome::Failed("connection refused".into()),
+                Duration::from_millis(5),
+            ),
+        ];
+        r.preflight_recorded(&results);
+        r.test_started(tref("t", "acceptance"));
+        r.test_passed(tref("t", "acceptance"), Duration::from_millis(1));
+        let xml = r.write(Duration::from_secs(1)).unwrap();
+        assert!(xml.contains("name=\"preflight\""), "xml: {xml}");
+        assert!(xml.contains("<failure"));
+        assert!(xml.contains("connection refused"));
+    }
+
+    #[test]
+    fn preflight_testsuite_appears_before_test_testsuite() {
+        // CI dashboards that iterate suites in document order should see
+        // the readiness checks first.
+        use crate::preflight_runner::ProbeOutcome;
+        let tmp = TempDir::new().unwrap();
+        let r = JunitReporter::new(cfg(&tmp));
+        let results = vec![make_probe_result(
+            "ok",
+            ProbeOutcome::Passed,
+            Duration::from_millis(2),
+        )];
+        r.preflight_recorded(&results);
+        r.test_started(tref("t", "acceptance"));
+        r.test_passed(tref("t", "acceptance"), Duration::from_millis(1));
+        let xml = r.write(Duration::from_secs(1)).unwrap();
+        // Look for the testsuite *element* — not the outer `<testsuites>`
+        // wrapper, which also carries name="acceptance".
+        let pre_idx = xml
+            .find("<testsuite name=\"preflight\"")
+            .expect("preflight testsuite present");
+        let suite_idx = xml
+            .find("<testsuite name=\"acceptance\"")
+            .expect("test testsuite present");
+        assert!(
+            pre_idx < suite_idx,
+            "preflight must precede tests in JUnit doc: {xml}",
+        );
     }
 
     #[test]

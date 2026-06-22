@@ -53,8 +53,13 @@ pub fn aggregate(expected: &[(&str, std::path::PathBuf)]) -> Report {
         for mut suite in parsed.test_suites {
             // Defensive: ensure the aggregate's <testsuite name> always
             // matches the parent's view of the target name, regardless of
-            // what the child wrote.
-            suite.name = (*target_name).into();
+            // what the child wrote — except for the synthetic preflight
+            // testsuite, which is identified by its literal name and must
+            // remain `preflight` in the aggregate (CI dashboards key off
+            // that name to surface readiness checks separately).
+            if suite.name.as_str() != "preflight" {
+                suite.name = (*target_name).into();
+            }
             report.add_test_suite(suite);
             found = true;
         }
@@ -203,5 +208,31 @@ mod tests {
     fn empty_expected_list_produces_empty_report() {
         let report = aggregate(&[]);
         assert!(report.test_suites.is_empty());
+    }
+
+    #[test]
+    fn synthetic_preflight_suite_keeps_its_name() {
+        // A test binary that runs preflight emits *two* suites in one
+        // part file — `preflight` and the regular test suite. The
+        // aggregator must leave `preflight` untouched so CI dashboards
+        // can key off the literal name; renaming both to the target
+        // would erase the distinction between probe and test results.
+        let tmp = TempDir::new().unwrap();
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="acceptance">
+  <testsuite name="preflight" tests="1">
+    <testcase classname="preflight" name="api" time="0.001"/>
+  </testsuite>
+  <testsuite name="acceptance" tests="1">
+    <testcase classname="acceptance" name="some_test" time="0.002"/>
+  </testsuite>
+</testsuites>
+"#;
+        fs::write(tmp.path().join("acceptance.xml"), xml).unwrap();
+        let expected = vec![("acceptance", tmp.path().join("acceptance.xml"))];
+
+        let report = aggregate(&expected);
+        let names: Vec<&str> = report.test_suites.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["preflight", "acceptance"]);
     }
 }
