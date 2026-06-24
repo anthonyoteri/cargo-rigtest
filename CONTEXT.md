@@ -22,6 +22,14 @@ schedules tests, and spawns subprocesses. Holds global setup state
 between tests and runs global teardown.
 _Avoid_: parent, runner, harness, scheduler.
 
+**Flaky**:
+A test that failed on at least one attempt but ultimately passed
+within its retry budget. Counted as **passed** for exit-code and
+summary-bucket purposes, but rendered as `FLAKY` in the per-test
+console line and counted as a parenthetical of `passed` in the run
+summary.
+_Avoid_: intermittent, retried, unstable.
+
 **Preflight**:
 The phase that runs once in the coordinator, before any test subprocess
 is spawned, to verify the suite's declared external dependencies. Also
@@ -39,6 +47,17 @@ _Avoid_: probe type, check kind, family.
 A single check declared inside a `Preflight` builder. A probe either
 **passes** or **fails** — never "reaches" or "succeeds."
 _Avoid_: test, assertion, check, dependency, reachability test.
+
+**Retry**:
+An additional attempt to run a test after a failed attempt. Bounded
+by the per-test `retries = N` declaration (max N additional attempts
+beyond the first), filtered by the optional `retry_on_error` matcher
+that pattern-matches against the user's typed `Err(_)` value, and
+override-able at run time by the CLI `--retries N` flag (which
+replaces the count but leaves the matcher in force). Panics, timeouts,
+and subprocess kills are never retried when a `retry_on_error`
+matcher is set.
+_Avoid_: rerun, repeat, attempt (as a verb).
 
 **Subprocess**:
 A child process spawned by the coordinator to run exactly one test.
