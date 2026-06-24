@@ -85,6 +85,13 @@ struct RunArgs {
     #[arg(long, value_enum, value_name = "REPORTER")]
     reporter: Option<ReporterKind>,
 
+    /// Override every test's declared retry count for this run. Set to 0
+    /// to disable retries entirely (strict mode). Leaves any declared
+    /// `retry_on_error` matcher in force: only failures the matcher
+    /// accepts consume an attempt.
+    #[arg(long, value_name = "N")]
+    retries: Option<usize>,
+
     /// Skip the preflight phase entirely. Use sparingly — preflight exists
     /// to catch missing environment dependencies *before* tests run.
     #[arg(long)]
@@ -222,6 +229,9 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         }
         if args.no_capture {
             test_cmd.arg("--no-capture");
+        }
+        if let Some(retries) = args.retries {
+            test_cmd.args(["--retries", &retries.to_string()]);
         }
         if args.no_preflight {
             test_cmd.arg("--no-preflight");

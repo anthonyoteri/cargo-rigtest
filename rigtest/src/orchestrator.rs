@@ -279,27 +279,31 @@ enum Outcome {
 /// Run a test with retries, returning the final outcome and updating the
 /// reporter.
 ///
-/// When the test declares a `retry_on_error` matcher, panics, timeouts,
-/// and subprocess crashes are not retried — only failures whose typed
-/// `Err(_)` matched the pattern (signalled via the `retry_eligible` field
-/// on `SubprocessOutcome::Failed`) consume a retry attempt.
+/// `retries_override` replaces the test's declared retry count when set
+/// (the CLI `--retries N` flag); the test's `retry_on_error` matcher (if
+/// any) is left in force regardless. When a matcher is in force, panics,
+/// timeouts, and subprocess crashes are not retried — only failures whose
+/// typed `Err(_)` matched the pattern are retried.
 async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     runner: &R,
     reporter: &P,
     tc: &crate::registry::TestCase,
     state_var: &str,
     state_json: &str,
+    retries_override: Option<usize>,
 ) -> (Outcome, Duration) {
     let tref = test_ref(tc);
     reporter.test_started(tref);
     let test_start = Instant::now();
-    let max_attempts = tc.retries + 1;
+    let effective_retries =
+        retries_override.map_or(tc.retries, |n| u32::try_from(n).unwrap_or(u32::MAX));
+    let max_attempts = effective_retries.saturating_add(1);
     let mut attempt_start = Instant::now();
 
-    // Framework-level failures (panic, timeout, crash) only consume a
-    // retry attempt when the test has not declared a `retry_on_error`
-    // matcher. When a matcher is in force the operator's intent is
-    // "retry only the errors I named" — so framework failures fail fast.
+    // Framework-level failures (panic, timeout, crash) only consume a retry
+    // attempt when the test has not declared a `retry_on_error` matcher.
+    // When a matcher is in force the operator's intent is "retry only the
+    // errors I named" — so panic/timeout/crash fail fast.
     let framework_eligible = !tc.retry_on_error_set;
 
     for attempt in 1..=max_attempts {
@@ -333,9 +337,9 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
             }) => {
                 let report_outcome = classify_failed(&stderr);
                 // A panic surfaces as a `Failed` outcome (the subprocess
-                // exits non-zero with "panicked at" on stderr). Apply the
-                // same matcher-aware policy as timeout/crash: never retry
-                // on panic when a matcher is in force.
+                // exits non-zero with "panicked at" on stderr). Hand it the
+                // same matcher-aware policy: never retry on panic when a
+                // matcher is in force.
                 let panic_eligible =
                     !(matches!(report_outcome, ReportOutcome::Panic) && tc.retry_on_error_set);
                 if is_last || !retry_eligible || !panic_eligible {
@@ -401,6 +405,8 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     unreachable!()
 }
 
+#[allow(clippy::too_many_arguments)] // wiring function; each value is a
+                                     // distinct piece of state that can't be meaningfully bundled.
 async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
     runner: Arc<R>,
     reporter: Arc<P>,
@@ -409,6 +415,7 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
     semaphore: Arc<Semaphore>,
     parallel_cases: Vec<&'static crate::registry::TestCase>,
     serial_cases: Vec<&'static crate::registry::TestCase>,
+    retries_override: Option<usize>,
 ) -> (usize, usize) {
     let mut passed = 0usize;
     let mut skipped = 0usize;
@@ -426,7 +433,15 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
                 .acquire()
                 .await
                 .expect("semaphore should not be closed");
-            let (outcome, _) = run_test(&*runner, &*reporter, tc, &state_var, &state_json).await;
+            let (outcome, _) = run_test(
+                &*runner,
+                &*reporter,
+                tc,
+                &state_var,
+                &state_json,
+                retries_override,
+            )
+            .await;
             outcome
         });
     }
@@ -441,7 +456,15 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
     }
 
     for tc in serial_cases {
-        let (outcome, _) = run_test(&*runner, &*reporter, tc, &state_var, &state_json).await;
+        let (outcome, _) = run_test(
+            &*runner,
+            &*reporter,
+            tc,
+            &state_var,
+            &state_json,
+            retries_override,
+        )
+        .await;
         match outcome {
             Outcome::Passed => passed += 1,
             Outcome::Skipped => skipped += 1,
@@ -550,6 +573,8 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     let (serial_cases, parallel_cases): (Vec<_>, Vec<_>) =
         cases.into_iter().partition(|tc| tc.serial);
 
+    let retries_override = args.retries;
+
     let (passed, skipped) = dispatch_cases(
         runner,
         Arc::clone(&reporter),
@@ -558,6 +583,7 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
         semaphore,
         parallel_cases,
         serial_cases,
+        retries_override,
     )
     .await;
 
@@ -589,20 +615,20 @@ mod tests {
     use std::sync::Mutex;
 
     fn make_case(name: &'static str) -> TestCase {
-        TestCase {
+        TestCase::new(
             name,
-            module: "test_module",
-            file: "test.rs",
-            serial: false,
-            timeout: None,
-            retries: 0,
-            retry_on_error_set: false,
-            tags: &[],
-            test_fn: |_ctx: Arc<TestContext>| -> BoxFuture<
+            "test_module",
+            "test.rs",
+            false,
+            None,
+            0,
+            false,
+            &[],
+            |_ctx: Arc<TestContext>| -> BoxFuture<
                 'static,
                 Result<(), Box<dyn std::error::Error + Send + Sync>>,
             > { Box::pin(async { Ok(()) }) },
-        }
+        )
     }
 
     fn case_with_tags(name: &'static str, tags: &'static [&'static str]) -> TestCase {
@@ -791,7 +817,7 @@ mod tests {
         let tc = case_with_retries("flaky", 1);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -803,7 +829,7 @@ mod tests {
         let tc = case_with_retries("skipper", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
 
         assert!(matches!(outcome, Outcome::Skipped));
         assert_eq!(runner.call_count(), 1);
@@ -819,10 +845,119 @@ mod tests {
         let tc = case_with_retries("always_fails", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 3); // initial + 2 retries
+    }
+
+    // ── retry_on_error matcher: subprocess-side eligibility hint ──
+
+    #[tokio::test]
+    async fn non_retry_eligible_failure_fails_immediately() {
+        let runner = FakeRunner::new(vec![mk_failed("assertion failure", false)]);
+        let tc = case_with_retry_on_error("strict_matcher", 5);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+
+        assert!(matches!(outcome, Outcome::Failed));
+        assert_eq!(
+            runner.call_count(),
+            1,
+            "non-matching error must not consume a retry attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_eligible_failure_with_matcher_retries() {
+        let runner = FakeRunner::new(vec![
+            mk_failed("transient", true),
+            SubprocessOutcome::Passed,
+        ]);
+        let tc = case_with_retry_on_error("flaky_with_matcher", 2);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+
+        assert!(matches!(outcome, Outcome::Passed));
+        assert_eq!(runner.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn timeout_with_matcher_does_not_retry() {
+        let runner = FakeRunner::new(vec![SubprocessOutcome::TimedOut(Duration::from_secs(1))]);
+        let tc = case_with_retry_on_error("times_out_matcher", 3);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+
+        assert!(matches!(outcome, Outcome::Failed));
+        assert_eq!(
+            runner.call_count(),
+            1,
+            "timeout with retry_on_error set must not consume a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_without_matcher_retries() {
+        let runner = FakeRunner::new(vec![
+            SubprocessOutcome::TimedOut(Duration::from_secs(1)),
+            SubprocessOutcome::Passed,
+        ]);
+        let tc = case_with_retries("times_out_then_passes", 2);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+
+        assert!(matches!(outcome, Outcome::Passed));
+        assert_eq!(runner.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn cli_override_replaces_declared_retry_count() {
+        let runner = FakeRunner::new(vec![
+            mk_failed("transient", true),
+            mk_failed("transient", true),
+            SubprocessOutcome::Passed,
+        ]);
+        // Declared `retries = 0` but CLI override bumps to 5.
+        let tc = case_with_retries("override_total", 0);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(5)).await;
+
+        assert!(matches!(outcome, Outcome::Passed));
+        assert_eq!(runner.call_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn cli_override_zero_disables_declared_retries() {
+        let runner = FakeRunner::new(vec![mk_failed("boom", true)]);
+        // Declared `retries = 3` but `--retries 0` forces strict mode.
+        let tc = case_with_retries("strict_run", 3);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(0)).await;
+
+        assert!(matches!(outcome, Outcome::Failed));
+        assert_eq!(runner.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn cli_override_leaves_matcher_in_force() {
+        let runner = FakeRunner::new(vec![mk_failed("not matching", false)]);
+        let tc = case_with_retry_on_error("override_keeps_matcher", 0);
+        let reporter = NullReporter;
+
+        // Even with the operator bumping to 10 retries, a non-matching
+        // error must still fail-fast — the override replaces the count
+        // but not the matcher.
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(10)).await;
+
+        assert!(matches!(outcome, Outcome::Failed));
+        assert_eq!(runner.call_count(), 1);
     }
 
     // ── Reporter seam: assert on the event sequence ──────────────────────
@@ -847,7 +982,7 @@ mod tests {
         let tc = case_with_retries("flaky", 1);
         let reporter = RecordingReporter::new();
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         let events = reporter.events();
@@ -912,6 +1047,7 @@ mod tests {
             semaphore,
             cases,
             Vec::new(),
+            None,
         )
         .await;
 
@@ -943,6 +1079,7 @@ mod tests {
             semaphore,
             parallel,
             serial,
+            None,
         )
         .await;
 
@@ -1018,6 +1155,7 @@ mod tests {
             semaphore,
             cases,
             Vec::new(),
+            None,
         )
         .await;
 
@@ -1029,55 +1167,6 @@ mod tests {
         assert!(
             max >= 1,
             "expected some concurrency to be observed, got {max}"
-        );
-    }
-
-    // ── retry_on_error matcher: subprocess-side eligibility hint ──
-
-    #[tokio::test]
-    async fn non_retry_eligible_failure_fails_immediately() {
-        let runner = FakeRunner::new(vec![mk_failed("assertion failure", false)]);
-        let tc = case_with_retry_on_error("strict_matcher", 5);
-        let reporter = NullReporter;
-
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
-
-        assert!(matches!(outcome, Outcome::Failed));
-        assert_eq!(
-            runner.call_count(),
-            1,
-            "non-matching error must not consume a retry attempt"
-        );
-    }
-
-    #[tokio::test]
-    async fn retry_eligible_failure_with_matcher_retries() {
-        let runner = FakeRunner::new(vec![
-            mk_failed("transient", true),
-            SubprocessOutcome::Passed,
-        ]);
-        let tc = case_with_retry_on_error("flaky_with_matcher", 2);
-        let reporter = NullReporter;
-
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
-
-        assert!(matches!(outcome, Outcome::Passed));
-        assert_eq!(runner.call_count(), 2);
-    }
-
-    #[tokio::test]
-    async fn timeout_with_matcher_does_not_retry() {
-        let runner = FakeRunner::new(vec![SubprocessOutcome::TimedOut(Duration::from_secs(1))]);
-        let tc = case_with_retry_on_error("times_out_matcher", 3);
-        let reporter = NullReporter;
-
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
-
-        assert!(matches!(outcome, Outcome::Failed));
-        assert_eq!(
-            runner.call_count(),
-            1,
-            "timeout with retry_on_error set must not consume a retry"
         );
     }
 }

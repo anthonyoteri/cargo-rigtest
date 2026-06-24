@@ -44,6 +44,16 @@ pub struct RuntimeArgs {
     #[arg(long, value_name = "REPORTER")]
     pub reporter: Option<String>,
 
+    /// Override every test's declared retry count for one run, in the
+    /// style of `nextest --retries N`. Useful as an operator escape hatch
+    /// when CI is flaky for a known reason. The override replaces each
+    /// test's count but leaves any declared `retry_on_error` matcher in
+    /// force: only failures the matcher accepts consume an attempt.
+    /// `--retries 0` disables retries entirely (strict mode) even for
+    /// tests that declared `retries = N`.
+    #[arg(long, value_name = "N")]
+    pub retries: Option<usize>,
+
     /// Skip the preflight phase entirely. Tests run regardless of whether
     /// declared external dependencies are reachable.
     #[arg(long)]
@@ -103,4 +113,44 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         return crate::runner::run_single(test_name, args.state_env_var.as_deref()).await;
     }
     crate::orchestrator::run(args).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> RuntimeArgs {
+        // The binary name is always the first arg; clap requires it but
+        // discards it during parsing.
+        let mut argv = vec!["rigtest"];
+        argv.extend_from_slice(extra);
+        RuntimeArgs::try_parse_from(argv).expect("RuntimeArgs should parse")
+    }
+
+    #[test]
+    fn retries_defaults_to_none() {
+        let args = parse(&[]);
+        assert_eq!(args.retries, None);
+    }
+
+    #[test]
+    fn retries_parses_positive_value() {
+        let args = parse(&["--retries", "5"]);
+        assert_eq!(args.retries, Some(5));
+    }
+
+    #[test]
+    fn retries_zero_is_distinct_from_unset() {
+        let args = parse(&["--retries", "0"]);
+        assert_eq!(args.retries, Some(0));
+    }
+
+    #[test]
+    fn retries_rejects_negative_value() {
+        let result = RuntimeArgs::try_parse_from(["rigtest", "--retries", "-1"]);
+        assert!(
+            result.is_err(),
+            "--retries must reject negative values; clap parsed: {result:?}"
+        );
+    }
 }
