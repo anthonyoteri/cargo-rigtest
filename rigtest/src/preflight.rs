@@ -278,14 +278,12 @@ pub struct Probe {
     ///
     /// - `Some(d)` — abort the probe after `d` and report a timeout
     ///   failure. Every primitive with a meaningful upper bound (tcp, dns,
-    ///   http, ssh) defaults to `Some(DEFAULT_PROBE_TIMEOUT)`; env probes
-    ///   carry one for diagnostic uniformity but evaluate synchronously
-    ///   and so never observe it.
+    ///   http, ssh) defaults to `Some(DEFAULT_PROBE_TIMEOUT)`.
     /// - `None` — run to completion with no framework-imposed deadline.
-    ///   Used only by [`Preflight::custom`]: the framework has zero
-    ///   insight into what work the closure does, so any default would
-    ///   be wrong for some legitimate use case; the closure owns its
-    ///   own discipline.
+    ///   Used by env probes (which evaluate synchronously) and by
+    ///   [`Preflight::custom`]: the framework has zero insight into what
+    ///   work the closure does, so any default would be wrong for some
+    ///   legitimate use case; the closure owns its own discipline.
     pub timeout: Option<Duration>,
 }
 
@@ -373,7 +371,7 @@ impl Preflight {
                 var: var.into(),
                 expected: None,
             },
-            timeout: Some(DEFAULT_PROBE_TIMEOUT),
+            timeout: None,
         });
         self
     }
@@ -529,14 +527,13 @@ impl Preflight {
     /// Overrides the timeout of the most recently added probe to `d`.
     ///
     /// There is no companion API for *removing* a default timeout from a
-    /// primitive that carries one — every primitive other than `custom`
-    /// carries a default specifically to prevent indefinite hangs in the
-    /// preflight phase.
+    /// primitive that carries one — every primitive with an async upper
+    /// bound carries a default specifically to prevent indefinite hangs in
+    /// the preflight phase.
     ///
     /// Has no effect when no probe has been added yet, and no effect on
     /// the *evaluation* of environment probes (they are synchronous), but
-    /// the value is still recorded so a future async `env` semantic can
-    /// observe it without an API break.
+    /// the value is still recorded on the probe.
     ///
     /// # Example
     ///
@@ -738,16 +735,16 @@ mod tests {
 
     #[test]
     fn each_primitive_carries_its_documented_default_timeout() {
-        // A regression guard for the documented defaults — every named
-        // primitive other than `custom` defaults to
-        // `Some(DEFAULT_PROBE_TIMEOUT)`; `custom` defaults to `None` (no
-        // framework-imposed deadline).
+        // A regression guard for the documented defaults — every async
+        // primitive (tcp, dns, http, ssh) defaults to
+        // `Some(DEFAULT_PROBE_TIMEOUT)`; env and custom default to `None`
+        // (no framework-imposed deadline).
         let mut p = Preflight::new()
             .tcp("tcp", "1.2.3.4:1")
             .env("env", "X")
             .dns("dns", "example.com");
         assert_eq!(p.probes()[0].timeout, Some(DEFAULT_PROBE_TIMEOUT));
-        assert_eq!(p.probes()[1].timeout, Some(DEFAULT_PROBE_TIMEOUT));
+        assert_eq!(p.probes()[1].timeout, None);
         assert_eq!(p.probes()[2].timeout, Some(DEFAULT_PROBE_TIMEOUT));
         p = p.custom("custom", || async { Ok(()) });
         assert_eq!(p.probes()[3].timeout, None);
