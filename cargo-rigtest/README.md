@@ -72,6 +72,7 @@ cargo rigtest run [OPTIONS]
 | `--test <NAME>` | Only run the named test target (repeatable: `--test a --test b`) |
 | `--package <NAME>` | Package containing the test targets |
 | `--no-capture` | Print test output in real time instead of capturing it (implies `--jobs 1`) |
+| `--retries <N>` | Override every test's declared retry count for this run (0 = strict, no retries) |
 | `--no-preflight` | Skip the preflight phase entirely (see [Preflight](#preflight)) |
 | `--preflight-only` | Run only the preflight phase and exit |
 | `--continue-on-preflight-failure` | Don't abort on preflight failure; tests still run |
@@ -83,6 +84,14 @@ reproduced exactly:
 ```
 cargo rigtest run --seed 12345678
 ```
+
+`--retries N` overrides each test's declared retry count for one run —
+useful as an operator escape hatch when CI is flaky for a known reason.
+The override replaces only the count: any test that declared a
+`#[testcase(retry_on_error = …)]` matcher keeps that matcher in force,
+so failures the matcher rejects still fail immediately. `--retries 0`
+is the explicit strict mode — every test runs exactly once, even those
+that declared `retries = N`.
 
 ---
 
