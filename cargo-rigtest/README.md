@@ -143,7 +143,7 @@ cargo rigtest run --tag smoke --not-tag slow   # smoke AND NOT slow
 `--tag`, `--not-tag`, and `--filter` compose with AND: a test must match
 the name filter, match at least one `--tag` (when any are given), and
 match none of the `--not-tag` values. If nothing matches, the run exits
-cleanly with a zero-result summary — the same behaviour as a `--filter`
+cleanly with a zero-result summary — the same behavior as a `--filter`
 that matches no tests.
 
 ---

@@ -113,7 +113,7 @@ pub(crate) async fn run_preflight() -> anyhow::Result<PreflightOutcome> {
     if probes.is_empty() {
         // A `#[preflight]` that declares no probes is legal — render the
         // result line so the operator can see the phase ran. Treat as
-        // "declared" so callers that key behaviour off declaration (e.g.
+        // "declared" so callers that key behavior off declaration (e.g.
         // `--preflight-only`'s success message) still get the same path
         // as a passing run.
         println_via(&multi, is_tty, "preflight result: 0 passed");

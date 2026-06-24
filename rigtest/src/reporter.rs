@@ -424,7 +424,7 @@ impl TestEventReporter for MultiReporter {
 // ── Test doubles ─────────────────────────────────────────────────────────
 
 /// A reporter that discards every event. Useful in tests that exercise the
-/// orchestrator's behaviour without needing to observe reporter output.
+/// orchestrator's behavior without needing to observe reporter output.
 #[cfg(test)]
 pub(crate) struct NullReporter;
 
