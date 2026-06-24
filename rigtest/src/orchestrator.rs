@@ -278,6 +278,11 @@ enum Outcome {
 
 /// Run a test with retries, returning the final outcome and updating the
 /// reporter.
+///
+/// When the test declares a `retry_on_error` matcher, panics, timeouts,
+/// and subprocess crashes are not retried — only failures whose typed
+/// `Err(_)` matched the pattern (signalled via the `retry_eligible` field
+/// on `SubprocessOutcome::Failed`) consume a retry attempt.
 async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     runner: &R,
     reporter: &P,
@@ -290,6 +295,12 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     let test_start = Instant::now();
     let max_attempts = tc.retries + 1;
     let mut attempt_start = Instant::now();
+
+    // Framework-level failures (panic, timeout, crash) only consume a
+    // retry attempt when the test has not declared a `retry_on_error`
+    // matcher. When a matcher is in force the operator's intent is
+    // "retry only the errors I named" — so framework failures fail fast.
+    let framework_eligible = !tc.retry_on_error_set;
 
     for attempt in 1..=max_attempts {
         let outcome = runner
@@ -318,9 +329,16 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
                 reason,
                 stdout,
                 stderr,
+                retry_eligible,
             }) => {
                 let report_outcome = classify_failed(&stderr);
-                if is_last {
+                // A panic surfaces as a `Failed` outcome (the subprocess
+                // exits non-zero with "panicked at" on stderr). Apply the
+                // same matcher-aware policy as timeout/crash: never retry
+                // on panic when a matcher is in force.
+                let panic_eligible =
+                    !(matches!(report_outcome, ReportOutcome::Panic) && tc.retry_on_error_set);
+                if is_last || !retry_eligible || !panic_eligible {
                     reporter.test_failed(tref, duration, report_outcome, &reason, &stdout, &stderr);
                     return (Outcome::Failed, duration);
                 }
@@ -337,7 +355,7 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
             }
             Ok(SubprocessOutcome::TimedOut(dur)) => {
                 let reason = format!("timed out after {:.1}s", dur.as_secs_f64());
-                if is_last {
+                if is_last || !framework_eligible {
                     reporter.test_failed(tref, duration, ReportOutcome::Timeout, &reason, "", "");
                     return (Outcome::Failed, duration);
                 }
@@ -353,7 +371,7 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
                 );
             }
             Err(e) => {
-                if is_last {
+                if is_last || !framework_eligible {
                     reporter.test_failed(
                         tref,
                         duration,
@@ -578,6 +596,7 @@ mod tests {
             serial: false,
             timeout: None,
             retries: 0,
+            retry_on_error_set: false,
             tags: &[],
             test_fn: |_ctx: Arc<TestContext>| -> BoxFuture<
                 'static,
@@ -748,14 +767,25 @@ mod tests {
         tc
     }
 
+    fn mk_failed(reason: &str, retry_eligible: bool) -> SubprocessOutcome {
+        SubprocessOutcome::Failed {
+            reason: reason.into(),
+            stdout: String::new(),
+            stderr: String::new(),
+            retry_eligible,
+        }
+    }
+
+    fn case_with_retry_on_error(name: &'static str, retries: u32) -> TestCase {
+        let mut tc = case_with_retries(name, retries);
+        tc.retry_on_error_set = true;
+        tc
+    }
+
     #[tokio::test]
     async fn retry_loop_succeeds_after_one_failure() {
         let runner = FakeRunner::new(vec![
-            SubprocessOutcome::Failed {
-                reason: "transient".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-            },
+            mk_failed("transient", true),
             SubprocessOutcome::Passed,
         ]);
         let tc = case_with_retries("flaky", 1);
@@ -781,12 +811,11 @@ mod tests {
 
     #[tokio::test]
     async fn retry_exhausts_and_reports_failure() {
-        let mk_fail = || SubprocessOutcome::Failed {
-            reason: "boom".into(),
-            stdout: String::new(),
-            stderr: String::new(),
-        };
-        let runner = FakeRunner::new(vec![mk_fail(), mk_fail(), mk_fail()]);
+        let runner = FakeRunner::new(vec![
+            mk_failed("boom", true),
+            mk_failed("boom", true),
+            mk_failed("boom", true),
+        ]);
         let tc = case_with_retries("always_fails", 2);
         let reporter = NullReporter;
 
@@ -812,11 +841,7 @@ mod tests {
     #[tokio::test]
     async fn retry_emits_retrying_event_before_passed() {
         let runner = FakeRunner::new(vec![
-            SubprocessOutcome::Failed {
-                reason: "first failure".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-            },
+            mk_failed("first failure", true),
             SubprocessOutcome::Passed,
         ]);
         let tc = case_with_retries("flaky", 1);
@@ -867,14 +892,7 @@ mod tests {
         let mut outcomes = HashMap::new();
         outcomes.insert("a", SubprocessOutcome::Passed);
         outcomes.insert("b", SubprocessOutcome::Skipped("nope".into()));
-        outcomes.insert(
-            "c",
-            SubprocessOutcome::Failed {
-                reason: "boom".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
+        outcomes.insert("c", mk_failed("boom", true));
         outcomes.insert("d", SubprocessOutcome::Passed);
         outcomes.insert("e", SubprocessOutcome::Passed);
         let runner = Arc::new(ByNameRunner { outcomes });
@@ -1011,6 +1029,55 @@ mod tests {
         assert!(
             max >= 1,
             "expected some concurrency to be observed, got {max}"
+        );
+    }
+
+    // ── retry_on_error matcher: subprocess-side eligibility hint ──
+
+    #[tokio::test]
+    async fn non_retry_eligible_failure_fails_immediately() {
+        let runner = FakeRunner::new(vec![mk_failed("assertion failure", false)]);
+        let tc = case_with_retry_on_error("strict_matcher", 5);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+
+        assert!(matches!(outcome, Outcome::Failed));
+        assert_eq!(
+            runner.call_count(),
+            1,
+            "non-matching error must not consume a retry attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_eligible_failure_with_matcher_retries() {
+        let runner = FakeRunner::new(vec![
+            mk_failed("transient", true),
+            SubprocessOutcome::Passed,
+        ]);
+        let tc = case_with_retry_on_error("flaky_with_matcher", 2);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+
+        assert!(matches!(outcome, Outcome::Passed));
+        assert_eq!(runner.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn timeout_with_matcher_does_not_retry() {
+        let runner = FakeRunner::new(vec![SubprocessOutcome::TimedOut(Duration::from_secs(1))]);
+        let tc = case_with_retry_on_error("times_out_matcher", 3);
+        let reporter = NullReporter;
+
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}").await;
+
+        assert!(matches!(outcome, Outcome::Failed));
+        assert_eq!(
+            runner.call_count(),
+            1,
+            "timeout with retry_on_error set must not consume a retry"
         );
     }
 }
