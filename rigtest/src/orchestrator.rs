@@ -10,11 +10,8 @@ use tokio::task::JoinSet;
 
 use crate::junit::{JunitConfig, JunitReporter};
 use crate::preflight_runner::{format_abort_message, run_preflight, PreflightOutcome};
-use crate::protocol::SubprocessOutcome;
 use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_PREFLIGHT, RIG_TEST_CASES};
-use crate::reporter::{
-    MultiReporter, Outcome as ReportOutcome, Reporter, TestEventReporter, TestRef,
-};
+use crate::reporter::{MultiReporter, Reporter, TestEventReporter, TestRef};
 use crate::scheduler::RuntimeArgs;
 use crate::subprocess::{OsSubprocessRunner, SubprocessRunner};
 
@@ -99,14 +96,6 @@ async fn handle_preflight_only(args: &RuntimeArgs) -> anyhow::Result<()> {
         failed_count,
         RIG_TEST_CASES.len(),
     ))))
-}
-
-fn classify_failed(stderr: &str) -> ReportOutcome {
-    if stderr.contains("panicked at") {
-        ReportOutcome::Panic
-    } else {
-        ReportOutcome::Assertion
-    }
 }
 
 fn test_ref(tc: &crate::registry::TestCase) -> TestRef<'_> {
@@ -300,95 +289,44 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     let max_attempts = effective_retries.saturating_add(1);
     let mut attempt_start = Instant::now();
 
-    // Framework-level failures (panic, timeout, crash) only consume a retry
-    // attempt when the test has not declared a `retry_on_error` matcher.
-    // When a matcher is in force the operator's intent is "retry only the
-    // errors I named" — so panic/timeout/crash fail fast.
-    let framework_eligible = !tc.retry_on_error_set;
-
     for attempt in 1..=max_attempts {
-        let outcome = runner.run(tc.name, state_var, state_json, tc.timeout).await;
+        let raw = runner.run(tc.name, state_var, state_json, tc.timeout).await;
 
         let is_last = attempt == max_attempts;
         let duration = test_start.elapsed();
         let attempt_duration = attempt_start.elapsed();
 
-        match outcome {
-            Ok(SubprocessOutcome::Passed) => {
+        match crate::retry::plan(raw, tc) {
+            crate::retry::AttemptPlan::Passed => {
                 reporter.test_passed(tref, duration);
                 return (Outcome::Passed, duration);
             }
-            Ok(SubprocessOutcome::Skipped(reason)) => {
+            crate::retry::AttemptPlan::Skipped { reason } => {
                 reporter.test_skipped(tref, duration, &reason);
                 return (Outcome::Skipped, duration);
             }
-            Ok(SubprocessOutcome::Failed {
+            crate::retry::AttemptPlan::Failed {
+                kind,
                 reason,
                 stdout,
                 stderr,
-                retry_eligible,
-            }) => {
-                let report_outcome = classify_failed(&stderr);
-                // A panic surfaces as a `Failed` outcome (the subprocess
-                // exits non-zero with "panicked at" on stderr). Hand it the
-                // same matcher-aware policy: never retry on panic when a
-                // matcher is in force.
-                let panic_eligible =
-                    !(matches!(report_outcome, ReportOutcome::Panic) && tc.retry_on_error_set);
-                if is_last || !retry_eligible || !panic_eligible {
-                    reporter.test_failed(tref, duration, report_outcome, &reason, &stdout, &stderr);
-                    return (Outcome::Failed, duration);
-                }
-                reporter.test_retrying(
-                    tref,
-                    attempt,
-                    max_attempts,
-                    report_outcome,
-                    &reason,
-                    &stdout,
-                    &stderr,
-                    attempt_duration,
-                );
-            }
-            Ok(SubprocessOutcome::TimedOut(dur)) => {
-                let reason = format!("timed out after {:.1}s", dur.as_secs_f64());
-                if is_last || !framework_eligible {
-                    reporter.test_failed(tref, duration, ReportOutcome::Timeout, &reason, "", "");
-                    return (Outcome::Failed, duration);
-                }
-                reporter.test_retrying(
-                    tref,
-                    attempt,
-                    max_attempts,
-                    ReportOutcome::Timeout,
-                    &reason,
-                    "",
-                    "",
-                    attempt_duration,
-                );
-            }
-            Err(e) => {
-                if is_last || !framework_eligible {
-                    reporter.test_failed(
+                retryable,
+            } => {
+                if !is_last && retryable {
+                    reporter.test_retrying(
                         tref,
-                        duration,
-                        ReportOutcome::Crash,
-                        &e.to_string(),
-                        "",
-                        "",
+                        attempt,
+                        max_attempts,
+                        kind,
+                        &reason,
+                        &stdout,
+                        &stderr,
+                        attempt_duration,
                     );
+                } else {
+                    reporter.test_failed(tref, duration, kind, &reason, &stdout, &stderr);
                     return (Outcome::Failed, duration);
                 }
-                reporter.test_retrying(
-                    tref,
-                    attempt,
-                    max_attempts,
-                    ReportOutcome::Crash,
-                    &e.to_string(),
-                    "",
-                    "",
-                    attempt_duration,
-                );
             }
         }
 
@@ -603,6 +541,7 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::context::TestContext;
+    use crate::protocol::SubprocessOutcome;
     use crate::registry::{BoxFuture, TestCase};
     use crate::reporter::{Event, NullReporter, RecordingReporter};
     use std::sync::Mutex;
@@ -960,17 +899,6 @@ mod tests {
     }
 
     // ── Reporter seam: assert on the event sequence ──────────────────────
-
-    #[test]
-    fn classify_failed_detects_panic_marker() {
-        let panic = "thread 'main' panicked at src/lib.rs:1\n";
-        assert!(matches!(classify_failed(panic), ReportOutcome::Panic));
-        assert!(matches!(
-            classify_failed("error: boom"),
-            ReportOutcome::Assertion
-        ));
-        assert!(matches!(classify_failed(""), ReportOutcome::Assertion));
-    }
 
     #[tokio::test]
     async fn retry_emits_retrying_event_before_passed() {
