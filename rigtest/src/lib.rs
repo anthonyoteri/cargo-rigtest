@@ -261,6 +261,7 @@ pub(crate) mod protocol;
 #[doc(hidden)]
 pub mod registry;
 pub(crate) mod reporter;
+pub(crate) mod retry;
 pub(crate) mod runner;
 pub(crate) mod scheduler;
 pub(crate) mod subprocess;
