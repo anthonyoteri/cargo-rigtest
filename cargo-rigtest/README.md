@@ -93,18 +93,24 @@ live spinners; results are printed as they complete:
 
 ```
 ── global setup
-PASS [0.142s] homepage_returns_200
-SKIP [0.031s] requires_live_database: DATABASE_URL not set
-FAIL [0.089s] creates_a_record: assertion failed at tests/acceptance.rs:42
+PASS  [0.142s] homepage_returns_200
+FLAKY [0.187s] eventually_consistent_read
+SKIP  [0.031s] requires_live_database: DATABASE_URL not set
+FAIL  [0.089s] creates_a_record: assertion failed at tests/acceptance.rs:42
 
   ── stdout
   created record with id 99
   expected count 1, got 2
 
 ────────────────────────────────────────────────────────────
-     Summary [0.21s] 3 tests run: 1 passed, 1 skipped, 1 failed
+     Summary [0.21s] 4 tests run: 2 passed (1 flaky), 1 skipped, 1 failed
 ── global teardown
 ```
+
+A test that failed on one or more attempts but ultimately passed within
+its `retries = N` budget is rendered as `FLAKY` (green, like `PASS`) and
+counted as a parenthetical of `passed` in the summary. A flaky-but-passing
+run still exits `0` — flaky is a visibility signal, not a verdict.
 
 In CI or piped output, spinners are replaced with plain lines so no output is lost.
 
