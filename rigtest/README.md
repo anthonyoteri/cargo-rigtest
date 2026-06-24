@@ -423,7 +423,7 @@ let output = rigtest::ssh!(ctx, "deploy@staging.example.com", "systemctl status 
 assert!(output.status.success());
 ```
 
-An optional destination-aware configurator can be registered to customise
+An optional destination-aware configurator can be registered to customize
 the connection — for example to accept self-signed host keys in a CI
 environment or to select a non-default identity file:
 

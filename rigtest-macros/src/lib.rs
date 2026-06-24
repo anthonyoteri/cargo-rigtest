@@ -301,7 +301,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
     validate_case_shape(&func, &case_rows, &case_param_positions)?;
 
     // No `#[case]` markers and no `#[case(...)]` rows → preserve the
-    // historical single-test behaviour exactly.
+    // historical single-test behavior exactly.
     if case_rows.is_empty() {
         let static_ident = registration_ident(&func_name_str, None);
         let expanded = quote! {
@@ -603,7 +603,7 @@ struct CaseRow {
     span: Span,
 }
 
-/// Recognise `#[case(...)]` / `#[case::label(...)]` attributes and parse
+/// Recognize `#[case(...)]` / `#[case::label(...)]` attributes and parse
 /// their positional argument list. Returns `None` for unrelated attributes.
 fn parse_case_attr(attr: &syn::Attribute) -> Option<Result<CaseRow, syn::Error>> {
     let path = attr.path();

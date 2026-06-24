@@ -166,7 +166,7 @@
 //!   state from `#[global_setup]`. Use [`global::<T>()`][TestContext::global]
 //!   for a typed shorthand that avoids the `downcast_ref` / `expect` boilerplate.
 //! - **[`setup`][TestContext::setup] / [`teardown`][TestContext::teardown]** —
-//!   async closures for per-test resource lifecycle. Failures are labelled
+//!   async closures for per-test resource lifecycle. Failures are labeled
 //!   `"setup failed:"` or `"teardown failed:"` in the report so the phase is
 //!   unambiguous.
 //! - **`client`** — a shared `reqwest::Client` when the `http-client`

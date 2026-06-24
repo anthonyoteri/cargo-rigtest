@@ -25,7 +25,7 @@ cargo fmt --all --check
 - Keep commits focused; one logical change per commit.
 - Follow [Conventional Commits](https://www.conventionalcommits.org/) — this is enforced by CI.
   Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `ci`, `chore`.
-- Add or update tests for any behaviour changes.
+- Add or update tests for any behavior changes.
 - All CI checks must pass before a PR can be merged.
 
 ## Commit style
