@@ -16,7 +16,7 @@ use crate::reporter::{
     MultiReporter, Outcome as ReportOutcome, Reporter, TestEventReporter, TestRef,
 };
 use crate::scheduler::RuntimeArgs;
-use crate::subprocess::{OsSubprocessRunner, SpawnRequest, SubprocessRunner};
+use crate::subprocess::{OsSubprocessRunner, SubprocessRunner};
 
 /// Sentinel error returned by [`run`] when the preflight phase aborts the
 /// suite. `run_main` downcasts this to translate the abort into exit code
@@ -307,14 +307,7 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     let framework_eligible = !tc.retry_on_error_set;
 
     for attempt in 1..=max_attempts {
-        let outcome = runner
-            .run(SpawnRequest {
-                test_name: tc.name,
-                state_var,
-                state_json,
-                timeout: tc.timeout,
-            })
-            .await;
+        let outcome = runner.run(tc.name, state_var, state_json, tc.timeout).await;
 
         let is_last = attempt == max_attempts;
         let duration = test_start.elapsed();
@@ -781,7 +774,13 @@ mod tests {
     }
 
     impl SubprocessRunner for FakeRunner {
-        async fn run(&self, _req: SpawnRequest<'_>) -> anyhow::Result<SubprocessOutcome> {
+        async fn run(
+            &self,
+            _test_name: &str,
+            _state_var: &str,
+            _state_json: &str,
+            _timeout: Option<Duration>,
+        ) -> anyhow::Result<SubprocessOutcome> {
             *self.calls.lock().unwrap() += 1;
             Ok(self.queue.lock().unwrap().remove(0))
         }
@@ -1013,10 +1012,16 @@ mod tests {
     }
 
     impl SubprocessRunner for ByNameRunner {
-        async fn run(&self, req: SpawnRequest<'_>) -> anyhow::Result<SubprocessOutcome> {
+        async fn run(
+            &self,
+            test_name: &str,
+            _state_var: &str,
+            _state_json: &str,
+            _timeout: Option<Duration>,
+        ) -> anyhow::Result<SubprocessOutcome> {
             Ok(self
                 .outcomes
-                .get(req.test_name)
+                .get(test_name)
                 .cloned()
                 .unwrap_or(SubprocessOutcome::Passed))
         }
@@ -1123,7 +1128,13 @@ mod tests {
     }
 
     impl SubprocessRunner for ConcurrencyRunner {
-        async fn run(&self, _req: SpawnRequest<'_>) -> anyhow::Result<SubprocessOutcome> {
+        async fn run(
+            &self,
+            _test_name: &str,
+            _state_var: &str,
+            _state_json: &str,
+            _timeout: Option<Duration>,
+        ) -> anyhow::Result<SubprocessOutcome> {
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_observed.fetch_max(now, Ordering::SeqCst);
             // Yield so other tasks can interleave and bump `active` if they

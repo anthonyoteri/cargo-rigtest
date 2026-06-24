@@ -802,7 +802,7 @@ fn build_testcase_body(
                         __rigtest_boxed
                     } else {
                         ::std::boxed::Box::new(
-                            ::rigtest::NotRetryEligible::new(__rigtest_boxed),
+                            ::rigtest::NotRetryEligible(__rigtest_boxed),
                         )
                     };
                     ::core::result::Result::Err(__rigtest_result)

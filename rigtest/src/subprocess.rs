@@ -12,14 +12,6 @@ use anyhow::anyhow;
 
 use crate::protocol::{self, SubprocessOutcome};
 
-/// Per-call parameters for a single subprocess invocation.
-pub(crate) struct SpawnRequest<'a> {
-    pub test_name: &'a str,
-    pub state_var: &'a str,
-    pub state_json: &'a str,
-    pub timeout: Option<Duration>,
-}
-
 /// Runs one test case as a subprocess and returns its outcome.
 ///
 /// `Send + Sync + 'static` so a runner can be shared via `Arc` into tasks
@@ -28,7 +20,10 @@ pub(crate) struct SpawnRequest<'a> {
 pub(crate) trait SubprocessRunner: Send + Sync + 'static {
     fn run(
         &self,
-        req: SpawnRequest<'_>,
+        test_name: &str,
+        state_var: &str,
+        state_json: &str,
+        timeout: Option<Duration>,
     ) -> impl std::future::Future<Output = anyhow::Result<SubprocessOutcome>> + Send;
 }
 
@@ -45,18 +40,24 @@ impl OsSubprocessRunner {
 }
 
 impl SubprocessRunner for OsSubprocessRunner {
-    async fn run(&self, req: SpawnRequest<'_>) -> anyhow::Result<SubprocessOutcome> {
+    async fn run(
+        &self,
+        test_name: &str,
+        state_var: &str,
+        state_json: &str,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<SubprocessOutcome> {
         let mut cmd = tokio::process::Command::new(&self.exe);
         cmd.arg("--run-single")
-            .arg(req.test_name)
+            .arg(test_name)
             .arg("--state-env-var")
-            .arg(req.state_var)
-            .env(req.state_var, req.state_json);
+            .arg(state_var)
+            .env(state_var, state_json);
 
         if self.no_capture {
-            spawn_no_capture(cmd, req.timeout).await
+            spawn_no_capture(cmd, timeout).await
         } else {
-            spawn_captured(cmd, req.timeout).await
+            spawn_captured(cmd, timeout).await
         }
     }
 }
