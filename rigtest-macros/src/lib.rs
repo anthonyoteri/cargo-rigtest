@@ -179,7 +179,36 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// | `serial` | Prevents concurrent execution with any other test. |
 /// | `timeout = <Duration>` | Kills and fails the test if it exceeds the given duration. |
 /// | `retries = <N>` | Retries a failed test up to `N` additional times before reporting failure. |
+/// | `retry_on_error = <pat>` | Only retry when the test's typed `Err(_)` matches the pattern (same syntax as `matches!`). Requires the function to return `Result<(), ConcreteType>`. |
 /// | `tags = ["a", "b"]` | Attaches one or more string tags for use with the `--tag` and `--not-tag` CLI filters. |
+///
+/// # The `retry_on_error` matcher
+///
+/// `retry_on_error = <pattern>` takes any Rust pattern accepted by the
+/// standard library's `matches!` macro — including alternatives with `|`
+/// and `if` guards — and pattern-matches the test's typed `Err(_)` value
+/// before the error is boxed. When the pattern matches, the failure is
+/// eligible for retry as usual; when it does not, the test fails
+/// immediately regardless of how many retries remain. Panics, timeouts,
+/// and subprocess kills are never retried when a matcher is in force.
+///
+/// The compiler rejects `retry_on_error` with `Result<(), rigtest::Error>`
+/// / `Result<(), Box<dyn Error + Send + Sync>>` / `Result<(), BoxError>`:
+/// pattern-matching on a boxed trait object is meaningless, and the
+/// matcher needs the concrete error type to splice into `matches!`. The
+/// rejection message points at the expected signature.
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use rigtest::{testcase, TestContext};
+///
+/// // `retry_on_error` requires a concrete error type, not `rigtest::Error`.
+/// #[testcase(retry_on_error = _)]
+/// async fn no_box_dyn_error(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
+///     Ok(())
+/// }
+/// # fn main() {}
+/// ```
 ///
 /// # Examples
 ///
@@ -268,8 +297,13 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
         serial,
         timeout_tokens,
         retries_tokens,
+        retry_on_error,
         tags_tokens,
     } = parse_testcase_flags(attr)?;
+
+    if retry_on_error.is_some() {
+        validate_retry_on_error_signature(&func)?;
+    }
 
     // Extract and strip stacked `#[case(...)]` / `#[case::label(...)]`
     // attributes from the function. Anything else stays on the re-emitted
@@ -300,10 +334,14 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
 
     validate_case_shape(&func, &case_rows, &case_param_positions)?;
 
+    let retry_on_error_set = retry_on_error.is_some();
+    let retry_on_error_set_tokens = quote! { #retry_on_error_set };
+
     // No `#[case]` markers and no `#[case(...)]` rows → preserve the
     // historical single-test behavior exactly.
     if case_rows.is_empty() {
         let static_ident = registration_ident(&func_name_str, None);
+        let body = build_testcase_body(&func_ident, &[quote! { ctx }], retry_on_error.as_ref());
         let expanded = quote! {
             #[allow(clippy::unused_async)]
             #func
@@ -318,8 +356,9 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
                     #serial,
                     #timeout_tokens,
                     #retries_tokens,
+                    #retry_on_error_set_tokens,
                     #tags_tokens,
-                    |ctx| ::std::boxed::Box::pin(async move { #func_ident(ctx).await }),
+                    |ctx| ::std::boxed::Box::pin(async move { #body }),
                 );
         };
         return Ok(TokenStream::from(expanded));
@@ -334,6 +373,8 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
         serial,
         timeout_tokens: &timeout_tokens,
         retries_tokens: &retries_tokens,
+        retry_on_error: retry_on_error.as_ref(),
+        retry_on_error_set_tokens: &retry_on_error_set_tokens,
         tags_tokens: &tags_tokens,
     })?;
 
@@ -351,6 +392,9 @@ struct TestcaseFlags {
     serial: bool,
     timeout_tokens: proc_macro2::TokenStream,
     retries_tokens: proc_macro2::TokenStream,
+    /// When present, the user-supplied pattern from `retry_on_error = <pat>`.
+    /// `None` when the matcher attribute is absent.
+    retry_on_error: Option<syn::Pat>,
     tags_tokens: proc_macro2::TokenStream,
 }
 
@@ -361,6 +405,7 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
     let mut serial = false;
     let mut timeout_tokens = quote! { None };
     let mut retries_tokens = quote! { 0u32 };
+    let mut retry_on_error: Option<syn::Pat> = None;
     let mut tags_tokens = quote! { &[] as &'static [&'static str] };
     for meta in &metas {
         match meta {
@@ -373,6 +418,9 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
                 let val = &nv.value;
                 retries_tokens = quote! { #val };
             }
+            syn::Meta::NameValue(nv) if nv.path.is_ident("retry_on_error") => {
+                retry_on_error = Some(parse_retry_on_error_pattern(&nv.value)?);
+            }
             syn::Meta::NameValue(nv) if nv.path.is_ident("tags") => {
                 tags_tokens = parse_tags(&nv.value)?;
             }
@@ -383,7 +431,139 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
         serial,
         timeout_tokens,
         retries_tokens,
+        retry_on_error,
         tags_tokens,
+    })
+}
+
+/// Parse the value of `retry_on_error = <pat>` as a Rust pattern, the same
+/// syntax accepted by `match` arms and the `matches!` macro.
+///
+/// `syn::Meta::NameValue` stores values as expressions, so we re-emit the
+/// caller's tokens and parse them as a [`syn::Pat`] with alternative
+/// patterns enabled — that mirrors what the codegen later splices into
+/// `matches!`.
+fn parse_retry_on_error_pattern(value: &syn::Expr) -> syn::Result<syn::Pat> {
+    let tokens = quote! { #value };
+    syn::parse::Parser::parse2(syn::Pat::parse_multi_with_leading_vert, tokens).map_err(|e| {
+        syn::Error::new(
+            e.span(),
+            format!(
+                "`retry_on_error` must be a pattern, the same syntax accepted by `matches!`: {e}"
+            ),
+        )
+    })
+}
+
+/// When `retry_on_error` is set, the user's test function must return
+/// `Result<(), ConcreteType>` — a named error type the macro can name in
+/// the generated `matches!` arm. Reject `Result<(), Box<dyn Error + …>>`,
+/// `Result<(), rigtest::Error>`, and `Result<(), BoxError>` at compile
+/// time with a message pointing at the signature.
+fn validate_retry_on_error_signature(func: &ItemFn) -> Result<(), syn::Error> {
+    let return_ty = match &func.sig.output {
+        ReturnType::Default => {
+            return Err(syn::Error::new_spanned(
+                &func.sig,
+                "#[testcase(retry_on_error = ...)] requires the test to return \
+                 `Result<(), ConcreteType>` (a named error type the matcher can pattern-match); \
+                 the function currently has no return type",
+            ));
+        }
+        ReturnType::Type(_, ty) => ty.as_ref(),
+    };
+
+    let err_ty = result_err_type(return_ty).ok_or_else(|| {
+        syn::Error::new_spanned(
+            return_ty,
+            "#[testcase(retry_on_error = ...)] requires the test to return \
+             `Result<(), ConcreteType>` where `ConcreteType` is a named error type \
+             (not `Box<dyn Error + Send + Sync>` / `rigtest::Error`); \
+             switch the signature to a concrete error type so the matcher can \
+             pattern-match on its variants",
+        )
+    })?;
+
+    if err_type_is_unmatchable(err_ty) {
+        return Err(syn::Error::new_spanned(
+            err_ty,
+            "#[testcase(retry_on_error = ...)] cannot match against a boxed trait object; \
+             switch the return type to `Result<(), ConcreteType>` with a named error type \
+             (for example a custom `#[derive(Debug)] enum MyError { Network, ... }`) so the \
+             matcher can pattern-match on its variants",
+        ));
+    }
+
+    Ok(())
+}
+
+/// If `ty` is `Result<(), E>` (or `core::result::Result<(), E>` /
+/// `std::result::Result<(), E>` / `Result<E>` with `Ok = ()` defaulted),
+/// returns the `E` type. Otherwise returns `None`. The macro only needs to
+/// recognise the common spelling — operator-defined type aliases that
+/// disguise the shape are out of scope, same as the rest of the macro's
+/// signature validation.
+fn result_err_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Result" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    let mut type_args = args.args.iter().filter_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    });
+    let _ok = type_args.next()?;
+    type_args.next()
+}
+
+/// Returns true when `ty` is a boxed `dyn Error + …` trait object or a
+/// known type alias to one (`rigtest::Error` / `BoxError`). The macro
+/// recognises these specific spellings so the most common signature
+/// mistake — leaving the framework's default error type in place — is
+/// caught at compile time. Aliases defined by the operator are out of
+/// scope and surface later as a normal type mismatch in the
+/// macro-generated `matches!` arm.
+fn err_type_is_unmatchable(ty: &Type) -> bool {
+    if type_is_box_dyn_error(ty) {
+        return true;
+    }
+    let Type::Path(tp) = ty else { return false };
+    let Some(last) = tp.path.segments.last() else {
+        return false;
+    };
+    matches!(last.ident.to_string().as_str(), "Error" | "BoxError")
+}
+
+/// Returns true when `ty` is `Box<dyn Error + ...>` for any error-trait
+/// path (e.g. `std::error::Error`, `core::error::Error`). The generic-arg
+/// check is purely structural — anything inside the angle brackets that
+/// names `Error` as the trait satisfies the check.
+fn type_is_box_dyn_error(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else { return false };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    if seg.ident != "Box" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return false;
+    };
+    args.args.iter().any(|a| {
+        let syn::GenericArgument::Type(Type::TraitObject(to)) = a else {
+            return false;
+        };
+        to.bounds.iter().any(|b| {
+            if let syn::TypeParamBound::Trait(tb) = b {
+                tb.path.segments.last().is_some_and(|s| s.ident == "Error")
+            } else {
+                false
+            }
+        })
     })
 }
 
@@ -502,6 +682,8 @@ struct CaseRegistrationInputs<'a> {
     serial: bool,
     timeout_tokens: &'a proc_macro2::TokenStream,
     retries_tokens: &'a proc_macro2::TokenStream,
+    retry_on_error: Option<&'a syn::Pat>,
+    retry_on_error_set_tokens: &'a proc_macro2::TokenStream,
     tags_tokens: &'a proc_macro2::TokenStream,
 }
 
@@ -517,6 +699,8 @@ fn build_case_registrations(
         serial,
         timeout_tokens,
         retries_tokens,
+        retry_on_error,
+        retry_on_error_set_tokens,
         tags_tokens,
     } = inputs;
     // Reject more than one non-case parameter so the error fires at macro
@@ -569,6 +753,7 @@ fn build_case_registrations(
             }
         }
 
+        let body = build_testcase_body(func_ident, &call_args, retry_on_error);
         registrations.push(quote! {
             #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
             #[linkme(crate = ::rigtest::__linkme)]
@@ -580,15 +765,53 @@ fn build_case_registrations(
                     #serial,
                     #timeout_tokens,
                     #retries_tokens,
+                    #retry_on_error_set_tokens,
                     #tags_tokens,
-                    |ctx| ::std::boxed::Box::pin(async move {
-                        #func_ident(#(#call_args),*).await
-                    }),
+                    |ctx| ::std::boxed::Box::pin(async move { #body }),
                 );
         });
     }
 
     Ok(registrations)
+}
+
+/// Generate the async body for the registered test wrapper. Without
+/// `retry_on_error` the body is the historical single-line call. With a
+/// matcher the body intercepts `Err(e)`, evaluates `matches!(&e, pat)`
+/// against the user's typed error, and (when the pattern doesn't match)
+/// wraps the boxed error in [`NotRetryEligible`][rigtest::NotRetryEligible]
+/// so the subprocess runner can encode the retry-eligibility hint on the
+/// wire. The user error is then boxed exactly as it always was.
+fn build_testcase_body(
+    func_ident: &syn::Ident,
+    call_args: &[proc_macro2::TokenStream],
+    retry_on_error: Option<&syn::Pat>,
+) -> proc_macro2::TokenStream {
+    if let Some(pat) = retry_on_error {
+        quote! {
+            match #func_ident(#(#call_args),*).await {
+                ::core::result::Result::Ok(()) => ::core::result::Result::Ok(()),
+                ::core::result::Result::Err(__rigtest_err) => {
+                    let __rigtest_eligible = matches!(&__rigtest_err, #pat);
+                    let __rigtest_boxed: ::std::boxed::Box<
+                        dyn ::std::error::Error + ::std::marker::Send + ::std::marker::Sync,
+                    > = ::std::boxed::Box::from(__rigtest_err);
+                    let __rigtest_result: ::std::boxed::Box<
+                        dyn ::std::error::Error + ::std::marker::Send + ::std::marker::Sync,
+                    > = if __rigtest_eligible {
+                        __rigtest_boxed
+                    } else {
+                        ::std::boxed::Box::new(
+                            ::rigtest::NotRetryEligible::new(__rigtest_boxed),
+                        )
+                    };
+                    ::core::result::Result::Err(__rigtest_result)
+                }
+            }
+        }
+    } else {
+        quote! { #func_ident(#(#call_args),*).await }
+    }
 }
 
 /// A parsed `#[case(...)]` / `#[case::label(...)]` row.

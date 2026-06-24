@@ -46,6 +46,14 @@ pub(crate) async fn run_single(test_name: &str, state_var: Option<&str>) -> anyh
                 eprintln!("{}", protocol::encode_skip(&e.to_string()));
                 crate::flush_and_exit(protocol::SKIP_EXIT_CODE);
             }
+            if e.downcast_ref::<crate::NotRetryEligible>().is_some() {
+                // Print the underlying message before exiting so the
+                // coordinator's captured stderr still carries the human
+                // failure reason; only the eligibility hint is encoded in
+                // the exit code.
+                eprintln!("{e}");
+                crate::flush_and_exit(protocol::FAIL_NOT_RETRYABLE_EXIT_CODE);
+            }
             Err(anyhow!("{e}"))
         }
         Err(_) => Err(anyhow!("panicked")),

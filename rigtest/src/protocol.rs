@@ -6,6 +6,12 @@
 /// Exit code written by a subprocess to signal a skipped test.
 pub(crate) const SKIP_EXIT_CODE: i32 = 2;
 
+/// Exit code written by a subprocess to signal a failure whose error value
+/// did not match the test's `retry_on_error` pattern. The coordinator reads
+/// this as `retry_eligible: false` and reports the failure immediately
+/// regardless of remaining attempts.
+pub(crate) const FAIL_NOT_RETRYABLE_EXIT_CODE: i32 = 3;
+
 /// Prefix written to stderr by a skipped test so the coordinator can extract
 /// the reason string.
 const SKIP_PREFIX: &str = "cargo-rigtest-skip: ";
@@ -19,6 +25,11 @@ pub(crate) enum SubprocessOutcome {
         reason: String,
         stdout: String,
         stderr: String,
+        /// `false` when the subprocess signalled that the test's typed
+        /// `Err(_)` value did not match its `retry_on_error` pattern.
+        /// Defaults to `true` for failures with no matcher in force, which
+        /// preserves the pre-matcher "retry on any failure" behavior.
+        retry_eligible: bool,
     },
     TimedOut(std::time::Duration),
 }
@@ -58,6 +69,7 @@ pub(crate) fn decode_outcome(
             reason: exit_code_reason(code),
             stdout,
             stderr,
+            retry_eligible: code != Some(FAIL_NOT_RETRYABLE_EXIT_CODE),
         },
     }
 }
@@ -103,7 +115,7 @@ mod tests {
         let outcome = decode_outcome(Some(1), "out".into(), "err".into());
         assert!(matches!(
             outcome,
-            SubprocessOutcome::Failed { stdout, stderr, .. }
+            SubprocessOutcome::Failed { stdout, stderr, retry_eligible: true, .. }
             if stdout == "out" && stderr == "err"
         ));
     }
@@ -113,8 +125,24 @@ mod tests {
         let outcome = decode_outcome(None, String::new(), String::new());
         assert!(matches!(
             outcome,
-            SubprocessOutcome::Failed { reason, .. }
+            SubprocessOutcome::Failed { reason, retry_eligible: true, .. }
             if reason.contains("-1")
+        ));
+    }
+
+    #[test]
+    fn decode_outcome_not_retryable_exit_code() {
+        let outcome = decode_outcome(
+            Some(FAIL_NOT_RETRYABLE_EXIT_CODE),
+            String::new(),
+            String::new(),
+        );
+        assert!(matches!(
+            outcome,
+            SubprocessOutcome::Failed {
+                retry_eligible: false,
+                ..
+            }
         ));
     }
 }

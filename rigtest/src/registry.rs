@@ -59,6 +59,14 @@ pub struct TestCase {
     /// `0` means no retries (the test runs exactly once). Set by
     /// `#[testcase(retries = N)]`.
     pub retries: u32,
+    /// `true` when the test was declared with a `retry_on_error = <pattern>`
+    /// matcher on `#[testcase]`.
+    ///
+    /// Lets the orchestrator distinguish "operator declared a matcher" from
+    /// "no matcher in force" without needing to know what the pattern is.
+    /// When `true`, panics, timeouts, and subprocess kills do not consume a
+    /// retry attempt: only failures the matcher accepted are retried.
+    pub retry_on_error_set: bool,
     /// Tags attached to this test, used by the `--tag` and `--not-tag` filters.
     ///
     /// Empty by default. Set by `#[testcase(tags = ["smoke", "regression"])]`.
@@ -85,6 +93,7 @@ impl TestCase {
         serial: bool,
         timeout: Option<std::time::Duration>,
         retries: u32,
+        retry_on_error_set: bool,
         tags: &'static [&'static str],
         test_fn: TestFn,
     ) -> Self {
@@ -95,6 +104,7 @@ impl TestCase {
             serial,
             timeout,
             retries,
+            retry_on_error_set,
             tags,
             test_fn,
         }

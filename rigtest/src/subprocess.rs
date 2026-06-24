@@ -160,6 +160,7 @@ async fn spawn_no_capture(
                 reason: protocol::exit_code_reason(code),
                 stdout: String::new(),
                 stderr: String::new(),
+                retry_eligible: code != Some(protocol::FAIL_NOT_RETRYABLE_EXIT_CODE),
             })
         }
     }

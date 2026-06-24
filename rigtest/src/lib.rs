@@ -362,6 +362,57 @@ impl std::fmt::Display for Skip {
 
 impl std::error::Error for Skip {}
 
+/// Marker error returned by the `#[testcase(retry_on_error = …)]`-generated
+/// wrapper when the user's typed `Err(_)` value did not match the declared
+/// pattern. The runtime inspects this marker to signal the coordinator (via
+/// the wire protocol's `retry_eligible: bool` hint) that the failure should
+/// not consume a retry attempt.
+///
+/// You will not typically construct this directly — the `retry_on_error`
+/// argument on `#[testcase]` generates it for you when a non-matching error
+/// is returned.
+///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax.
+#[doc(hidden)]
+#[non_exhaustive]
+pub struct NotRetryEligible(
+    /// The user's original boxed error. Used for the failure-reason rendered
+    /// to the operator; the retry-eligibility hint is carried by the wrapper
+    /// type itself.
+    pub Error,
+);
+
+impl NotRetryEligible {
+    /// Constructs a [`NotRetryEligible`]. Intended for use by the
+    /// `#[testcase(retry_on_error = …)]` proc macro; not part of the stable
+    /// public API.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new(inner: Error) -> Self {
+        Self(inner)
+    }
+}
+
+impl std::fmt::Debug for NotRetryEligible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NotRetryEligible({:?})", self.0)
+    }
+}
+
+impl std::fmt::Display for NotRetryEligible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for NotRetryEligible {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 /// Skip the current test with an optional reason.
 ///
 /// Immediately returns a [`Skip`] error from the enclosing test function.

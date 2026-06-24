@@ -113,7 +113,33 @@ Optional flags can be combined in any order:
 | `serial` | Run this test exclusively — no other test runs concurrently with it |
 | `timeout = <Duration>` | Hard-kill the test subprocess and report failure if it exceeds the duration |
 | `retries = <N>` | Retry a failing test up to N additional times before reporting failure. A test that fails on one or more attempts but ultimately passes is rendered as `FLAKY` in the console (and counted in the `(N flaky)` summary parenthetical) — the run still exits `0`. |
+| `retry_on_error = <pat>` | Only retry when the typed `Err(_)` matches the pattern (same syntax as `matches!`); requires a concrete error type — see below |
 | `tags = ["smoke", …]` | Attach string tags for use with the `--tag` / `--not-tag` CLI filters |
+
+The `retry_on_error` matcher pattern-matches the test's typed `Err(_)`
+value with the same syntax as the standard library's `matches!` macro —
+including alternatives with `|` and `if` guards. When a matcher is set
+the test must return `Result<(), ConcreteType>` (a named error type, not
+`Box<dyn Error + Send + Sync>` / `rigtest::Error`); the compiler enforces
+this and emits a message pointing at the signature. Panics, timeouts,
+and subprocess kills are never retried when a matcher is in force.
+
+```rust
+#[derive(Debug)]
+enum MyError {
+    Network(String),
+    Timeout,
+    Assertion(String),
+}
+// impl std::fmt::Display and std::error::Error ...
+
+#[testcase(retries = 3, retry_on_error = MyError::Network(_) | MyError::Timeout)]
+async fn deploys_eventually(_ctx: Arc<TestContext>) -> Result<(), MyError> {
+    // Retried up to 3 times on Network or Timeout; assertion failures
+    // surface immediately on the first attempt.
+    Ok(())
+}
+```
 
 > **Note on timeout and teardown:** when a timeout fires, the subprocess is
 > terminated — on Linux and macOS a graceful signal is sent first, with a
