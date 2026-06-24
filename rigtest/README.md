@@ -112,7 +112,7 @@ Optional flags can be combined in any order:
 |------|-------------|
 | `serial` | Run this test exclusively — no other test runs concurrently with it |
 | `timeout = <Duration>` | Hard-kill the test subprocess and report failure if it exceeds the duration |
-| `retries = <N>` | Retry a failing test up to N additional times before reporting failure |
+| `retries = <N>` | Retry a failing test up to N additional times before reporting failure. A test that fails on one or more attempts but ultimately passes is rendered as `FLAKY` in the console (and counted in the `(N flaky)` summary parenthetical) — the run still exits `0`. |
 | `tags = ["smoke", …]` | Attach string tags for use with the `--tag` / `--not-tag` CLI filters |
 
 > **Note on timeout and teardown:** when a timeout fires, the subprocess is
