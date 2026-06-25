@@ -12,7 +12,7 @@ use clap::Subcommand;
 use clap::ValueEnum;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum ReporterKind {
+pub(crate) enum ReporterKind {
     Junit,
 }
 
@@ -124,44 +124,32 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn run(args: &RunArgs) -> anyhow::Result<()> {
-    let mut build_cmd = Command::new("cargo");
-    build_cmd
-        .arg("test")
-        .arg("--no-run")
-        .arg("--message-format=json");
+    let targets = discover_targets(args)?;
+    let junit = junit::JunitCoordinator::for_run(args.reporter)?;
 
-    if let Some(ref pkg) = args.package {
-        build_cmd.args(["--package", pkg]);
+    let mut last_code = 0i32;
+    for (name, executable) in &targets {
+        let code = spawn_target(name, executable, args, junit.as_ref())?;
+        if code != 0 {
+            last_code = code;
+        }
     }
 
-    for name in &args.test {
-        build_cmd.args(["--test", name]);
+    if let Some(j) = &junit {
+        j.finalize(&targets)?;
     }
 
-    build_cmd.stdout(Stdio::piped());
-    build_cmd.stderr(Stdio::inherit());
+    std::process::exit(last_code);
+}
 
-    let output = build_cmd
-        .output()
-        .context("failed to spawn `cargo test --no-run`")?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "cargo test --no-run failed with exit code {}",
-            output
-                .status
-                .code()
-                .map_or_else(|| "unknown".to_string(), |c| c.to_string()),
-        ));
-    }
-
-    let stdout = String::from_utf8(output.stdout).context("cargo output was not valid UTF-8")?;
-
-    let all_targets = find_all_test_executables(&stdout);
-
-    let rig_targets: Vec<_> = all_targets
+/// Build the test binaries via `cargo test --no-run`, then filter the
+/// resulting artifacts down to the rig targets the operator asked for.
+/// Errors when no rig binaries exist or when `--test` names a target that
+/// did not build.
+fn discover_targets(args: &RunArgs) -> anyhow::Result<Vec<(String, String)>> {
+    let stdout = build_test_binaries(args)?;
+    let rig_targets: Vec<_> = find_all_test_executables(&stdout)
         .into_iter()
         .filter(|(_, exe)| is_rig_binary(exe))
         .collect();
@@ -174,180 +162,119 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         ));
     }
 
-    let targets: Vec<_> = if args.test.is_empty() {
-        rig_targets
-    } else {
-        let unknown: Vec<_> = args
-            .test
-            .iter()
-            .filter(|name| !rig_targets.iter().any(|(n, _)| n == *name))
-            .collect();
-        if !unknown.is_empty() {
-            return Err(anyhow!(
-                "unknown rig test target(s): {}. \
-                 Run without --test to run all rig targets.",
-                unknown
-                    .iter()
-                    .map(|s| format!("'{s}'"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        rig_targets
-            .into_iter()
-            .filter(|(n, _)| args.test.contains(n))
-            .collect()
-    };
-
-    let junit = match args.reporter {
-        Some(ReporterKind::Junit) => Some(prepare_junit_paths()?),
-        None => None,
-    };
-
-    let mut last_code = 0i32;
-
-    for (name, executable) in &targets {
-        println!("cargo-rigtest: running '{name}'");
-
-        let mut test_cmd = Command::new(executable);
-        test_cmd.env("CARGO_RIGTEST", "1");
-
-        if let Some(jobs) = args.jobs {
-            test_cmd.args(["--jobs", &jobs.to_string()]);
-        }
-        if let Some(seed) = args.seed {
-            test_cmd.args(["--seed", &seed.to_string()]);
-        }
-        if let Some(ref filter) = args.filter {
-            test_cmd.args(["--filter", filter]);
-        }
-        for tag in &args.tag {
-            test_cmd.args(["--tag", tag]);
-        }
-        for tag in &args.not_tag {
-            test_cmd.args(["--not-tag", tag]);
-        }
-        if args.no_capture {
-            test_cmd.arg("--no-capture");
-        }
-        if let Some(retries) = args.retries {
-            test_cmd.args(["--retries", &retries.to_string()]);
-        }
-        if args.no_preflight {
-            test_cmd.arg("--no-preflight");
-        }
-        if args.preflight_only {
-            test_cmd.arg("--preflight-only");
-        }
-        if args.continue_on_preflight_failure {
-            test_cmd.arg("--continue-on-preflight-failure");
-        }
-        if let Some(paths) = &junit {
-            test_cmd.args(["--reporter", "junit"]);
-            test_cmd.env("RIGTEST_JUNIT_OUTPUT_PATH", paths.part_for(executable));
-            test_cmd.env("RIGTEST_JUNIT_SUITE_NAME", name);
-        }
-
-        let status = test_cmd
-            .status()
-            .with_context(|| format!("failed to execute test binary: {executable}"))?;
-
-        let code = status.code().unwrap_or(1);
-        if code != 0 {
-            last_code = code;
-        }
+    if args.test.is_empty() {
+        return Ok(rig_targets);
     }
 
-    if let Some(paths) = &junit {
-        let expected: Vec<(&str, std::path::PathBuf)> = targets
-            .iter()
-            .map(|(n, exe)| (n.as_str(), paths.part_for(exe)))
-            .collect();
-        let report = junit::aggregate(&expected);
-        write_aggregate(&paths.final_path, &report)?;
-        println!(
-            "cargo-rigtest: JUnit XML written to {}",
-            paths.final_path.display()
-        );
+    let unknown: Vec<_> = args
+        .test
+        .iter()
+        .filter(|name| !rig_targets.iter().any(|(n, _)| n == *name))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(anyhow!(
+            "unknown rig test target(s): {}. \
+             Run without --test to run all rig targets.",
+            unknown
+                .iter()
+                .map(|s| format!("'{s}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(rig_targets
+        .into_iter()
+        .filter(|(n, _)| args.test.contains(n))
+        .collect())
+}
+
+/// Invoke `cargo test --no-run --message-format=json` for the relevant
+/// package and `--test` filters, returning the captured stdout for
+/// downstream artifact parsing.
+fn build_test_binaries(args: &RunArgs) -> anyhow::Result<String> {
+    let mut build_cmd = Command::new("cargo");
+    build_cmd
+        .arg("test")
+        .arg("--no-run")
+        .arg("--message-format=json");
+
+    if let Some(ref pkg) = args.package {
+        build_cmd.args(["--package", pkg]);
+    }
+    for name in &args.test {
+        build_cmd.args(["--test", name]);
     }
 
-    std::process::exit(last_code);
-}
+    build_cmd.stdout(Stdio::piped());
+    build_cmd.stderr(Stdio::inherit());
 
-struct JunitPaths {
-    parts_dir: std::path::PathBuf,
-    final_path: std::path::PathBuf,
-}
-
-impl JunitPaths {
-    /// Part file path keyed by the executable's filename stem — which
-    /// cargo includes a unique hash in — so two workspace crates with the
-    /// same `[[test]]` target name do not collide on the same part file.
-    fn part_for(&self, executable: &str) -> std::path::PathBuf {
-        let stem = std::path::Path::new(executable)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("part");
-        self.parts_dir.join(format!("{stem}.xml"))
-    }
-}
-
-/// Resolve the cargo target directory (honoring `CARGO_TARGET_DIR`),
-/// clean any pre-existing `rigtest/parts/` so stale results never leak into
-/// the aggregate, and return the well-known paths used during the run.
-fn prepare_junit_paths() -> anyhow::Result<JunitPaths> {
-    let target = cargo_target_dir().context("failed to resolve cargo target directory")?;
-    let parts_dir = target.join("rigtest").join("parts");
-    let final_path = target.join("rigtest").join("junit.xml");
-
-    if parts_dir.exists() {
-        std::fs::remove_dir_all(&parts_dir)
-            .with_context(|| format!("failed to clean {}", parts_dir.display()))?;
-    }
-    std::fs::create_dir_all(&parts_dir)
-        .with_context(|| format!("failed to create {}", parts_dir.display()))?;
-
-    Ok(JunitPaths {
-        parts_dir,
-        final_path,
-    })
-}
-
-fn cargo_target_dir() -> anyhow::Result<std::path::PathBuf> {
-    let output = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version=1"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+    let output = build_cmd
         .output()
-        .context("failed to spawn `cargo metadata`")?;
+        .context("failed to spawn `cargo test --no-run`")?;
     if !output.status.success() {
-        return Err(anyhow!("cargo metadata failed"));
+        return Err(anyhow!(
+            "cargo test --no-run failed with exit code {}",
+            output
+                .status
+                .code()
+                .map_or_else(|| "unknown".to_string(), |c| c.to_string()),
+        ));
     }
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("cargo metadata produced invalid JSON")?;
-    let dir = value
-        .get("target_directory")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("cargo metadata missing 'target_directory'"))?;
-    Ok(std::path::PathBuf::from(dir))
+    String::from_utf8(output.stdout).context("cargo output was not valid UTF-8")
 }
 
-fn write_aggregate(path: &std::path::Path, report: &quick_junit::Report) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+/// Spawn one rig test binary, attaching every relevant CLI flag and
+/// (when present) the `JUnit` reporter wiring. Returns the child's exit
+/// code; the caller aggregates these into the final process exit.
+fn spawn_target(
+    name: &str,
+    executable: &str,
+    args: &RunArgs,
+    junit: Option<&junit::JunitCoordinator>,
+) -> anyhow::Result<i32> {
+    println!("cargo-rigtest: running '{name}'");
+
+    let mut test_cmd = Command::new(executable);
+    test_cmd.env("CARGO_RIGTEST", "1");
+
+    if let Some(jobs) = args.jobs {
+        test_cmd.args(["--jobs", &jobs.to_string()]);
     }
-    let xml = report
-        .to_string()
-        .context("failed to serialize aggregated JUnit XML")?;
-    // Atomic write: a crash during serialize/write leaves the previous
-    // aggregate in place rather than a half-written file pretending to be
-    // current.
-    let tmp = path.with_extension("xml.tmp");
-    std::fs::write(&tmp, xml).with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename into {}", path.display()))?;
-    Ok(())
+    if let Some(seed) = args.seed {
+        test_cmd.args(["--seed", &seed.to_string()]);
+    }
+    if let Some(ref filter) = args.filter {
+        test_cmd.args(["--filter", filter]);
+    }
+    for tag in &args.tag {
+        test_cmd.args(["--tag", tag]);
+    }
+    for tag in &args.not_tag {
+        test_cmd.args(["--not-tag", tag]);
+    }
+    if args.no_capture {
+        test_cmd.arg("--no-capture");
+    }
+    if let Some(retries) = args.retries {
+        test_cmd.args(["--retries", &retries.to_string()]);
+    }
+    if args.no_preflight {
+        test_cmd.arg("--no-preflight");
+    }
+    if args.preflight_only {
+        test_cmd.arg("--preflight-only");
+    }
+    if args.continue_on_preflight_failure {
+        test_cmd.arg("--continue-on-preflight-failure");
+    }
+    if let Some(j) = junit {
+        j.attach_to(&mut test_cmd, name, executable);
+    }
+
+    let status = test_cmd
+        .status()
+        .with_context(|| format!("failed to execute test binary: {executable}"))?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// Returns true if `exe` is a rig test binary (responds to --rig-probe with exit 0).
