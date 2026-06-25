@@ -5,8 +5,132 @@
 //! parent reads every part, merges the inner `<testsuite>` elements into a
 //! single document at `target/rigtest/junit.xml`, and synthesizes an error
 //! `<testsuite>` for any expected binary that did not produce results.
+//!
+//! [`JunitCoordinator`] owns the lifecycle: prepare the `parts/` directory
+//! before the run, attach `--reporter junit` + the per-target env vars to
+//! each child `Command`, and aggregate + atomically write the final XML
+//! once every binary has exited.
 
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use anyhow::{anyhow, Context};
 use quick_junit::{NonSuccessKind, Report, TestCase, TestCaseStatus, TestSuite};
+
+use crate::ReporterKind;
+
+/// Owns the optional `JUnit` lifecycle for one `cargo rig run` invocation.
+///
+/// Construct via [`Self::for_run`]; returns `None` when `--reporter junit`
+/// is absent so the caller can pattern-match without sprinkling
+/// `if args.reporter == Some(_)` checks across the run path.
+pub(crate) struct JunitCoordinator {
+    parts_dir: PathBuf,
+    final_path: PathBuf,
+}
+
+impl JunitCoordinator {
+    /// `Some(coordinator)` when the operator requested the `junit` reporter;
+    /// `None` otherwise. Cleaning the parts directory happens here so a
+    /// crashed previous run can't leak stale suites into the next aggregate.
+    pub(crate) fn for_run(reporter: Option<ReporterKind>) -> anyhow::Result<Option<Self>> {
+        match reporter {
+            Some(ReporterKind::Junit) => Ok(Some(Self::prepare()?)),
+            None => Ok(None),
+        }
+    }
+
+    fn prepare() -> anyhow::Result<Self> {
+        let target = cargo_target_dir().context("failed to resolve cargo target directory")?;
+        let parts_dir = target.join("rigtest").join("parts");
+        let final_path = target.join("rigtest").join("junit.xml");
+
+        if parts_dir.exists() {
+            std::fs::remove_dir_all(&parts_dir)
+                .with_context(|| format!("failed to clean {}", parts_dir.display()))?;
+        }
+        std::fs::create_dir_all(&parts_dir)
+            .with_context(|| format!("failed to create {}", parts_dir.display()))?;
+
+        Ok(Self {
+            parts_dir,
+            final_path,
+        })
+    }
+
+    /// Attach `--reporter junit` plus the per-target env vars (output path
+    /// and suite name) to a test-binary `Command` about to be spawned.
+    pub(crate) fn attach_to(&self, cmd: &mut Command, name: &str, executable: &str) {
+        cmd.args(["--reporter", "junit"]);
+        cmd.env("RIGTEST_JUNIT_OUTPUT_PATH", self.part_for(executable));
+        cmd.env("RIGTEST_JUNIT_SUITE_NAME", name);
+    }
+
+    /// Collect every expected part file, aggregate them into one `Report`,
+    /// and atomically write the result to `<target>/rigtest/junit.xml`.
+    /// Logs the final path on stdout.
+    pub(crate) fn finalize(&self, targets: &[(String, String)]) -> anyhow::Result<()> {
+        let expected: Vec<(&str, PathBuf)> = targets
+            .iter()
+            .map(|(n, exe)| (n.as_str(), self.part_for(exe)))
+            .collect();
+        let report = aggregate(&expected);
+        write_aggregate(&self.final_path, &report)?;
+        println!(
+            "cargo-rigtest: JUnit XML written to {}",
+            self.final_path.display()
+        );
+        Ok(())
+    }
+
+    /// Part file path keyed by the executable's filename stem — which cargo
+    /// includes a unique hash in — so two workspace crates with the same
+    /// `[[test]]` target name do not collide on the same part file.
+    fn part_for(&self, executable: &str) -> PathBuf {
+        let stem = Path::new(executable)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("part");
+        self.parts_dir.join(format!("{stem}.xml"))
+    }
+}
+
+fn cargo_target_dir() -> anyhow::Result<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
+        .context("failed to spawn `cargo metadata`")?;
+    if !output.status.success() {
+        return Err(anyhow!("cargo metadata failed"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("cargo metadata produced invalid JSON")?;
+    let dir = value
+        .get("target_directory")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("cargo metadata missing 'target_directory'"))?;
+    Ok(PathBuf::from(dir))
+}
+
+fn write_aggregate(path: &Path, report: &Report) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let xml = report
+        .to_string()
+        .context("failed to serialize aggregated JUnit XML")?;
+    // Atomic write: a crash during serialize/write leaves the previous
+    // aggregate in place rather than a half-written file pretending to be
+    // current.
+    let tmp = path.with_extension("xml.tmp");
+    std::fs::write(&tmp, xml).with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename into {}", path.display()))?;
+    Ok(())
+}
 
 /// Aggregate per-binary part files into a single `Report`.
 ///
