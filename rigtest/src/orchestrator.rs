@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::junit::{JunitConfig, JunitReporter};
-use crate::preflight_runner::{format_abort_message, run_preflight, PreflightOutcome};
+use crate::preflight_runner::{run_preflight, PreflightReport};
 use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_PREFLIGHT, RIG_TEST_CASES};
 use crate::reporter::{MultiReporter, Reporter, TestEventReporter, TestRef};
 use crate::scheduler::RuntimeArgs;
@@ -43,30 +43,25 @@ async fn handle_preflight_phase(
     args: &RuntimeArgs,
     reporter: &Arc<MultiReporter>,
 ) -> anyhow::Result<ControlFlow> {
-    let preflight_outcome = if args.no_preflight {
-        PreflightOutcome::none()
+    let report = if args.no_preflight {
+        PreflightReport::none()
     } else {
         match run_preflight().await {
-            Ok(outcome) => outcome,
+            Ok(report) => report,
             Err(e) => return Err(anyhow::Error::new(PreflightAbort(e.to_string()))),
         }
     };
 
-    if preflight_outcome.declared && !preflight_outcome.results.is_empty() {
-        reporter.preflight_recorded(&preflight_outcome.results);
+    if report.verdict.declared && !report.results.is_empty() {
+        reporter.preflight_recorded(&report.results);
     }
 
-    if !preflight_outcome.passed && !args.continue_on_preflight_failure {
-        let failed_count = preflight_outcome
-            .results
-            .iter()
-            .filter(|r| matches!(r.outcome, crate::preflight_runner::ProbeOutcome::Failed(_)))
-            .count();
+    if !report.verdict.passed && !args.continue_on_preflight_failure {
         // Still let the JUnit reporter flush — otherwise the preflight
         // testsuite we just recorded would never reach disk.
         let _ = reporter.finish(0, 0, 0, Duration::ZERO);
         return Ok(ControlFlow::Abort(anyhow::Error::new(PreflightAbort(
-            format_abort_message(failed_count, RIG_TEST_CASES.len()),
+            format_abort_message(report.verdict.failed_count, RIG_TEST_CASES.len()),
         ))));
     }
 
@@ -81,21 +76,27 @@ async fn handle_preflight_only(args: &RuntimeArgs) -> anyhow::Result<()> {
         println!("no preflight declared");
         return Ok(());
     }
-    let outcome = run_preflight()
+    let report = run_preflight()
         .await
         .map_err(|e| anyhow::Error::new(PreflightAbort(e.to_string())))?;
-    if outcome.passed {
+    if report.verdict.passed {
         return Ok(());
     }
-    let failed_count = outcome
-        .results
-        .iter()
-        .filter(|r| matches!(r.outcome, crate::preflight_runner::ProbeOutcome::Failed(_)))
-        .count();
     Err(anyhow::Error::new(PreflightAbort(format_abort_message(
-        failed_count,
+        report.verdict.failed_count,
         RIG_TEST_CASES.len(),
     ))))
+}
+
+/// Format the abort message printed when preflight failures stop a suite.
+/// Lives here because the Coordinator owns the abort policy; the runner
+/// no longer needs to know what an abort message looks like or how many
+/// tests are in the registry.
+fn format_abort_message(failed_count: usize, tests_total: usize) -> String {
+    format!(
+        "{failed_count} probe{plural} failed — aborting suite ({tests_total} tests not run)",
+        plural = if failed_count == 1 { "" } else { "s" },
+    )
 }
 
 fn test_ref(tc: &crate::registry::TestCase) -> TestRef<'_> {
