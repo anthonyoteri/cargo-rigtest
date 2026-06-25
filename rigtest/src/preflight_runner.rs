@@ -45,48 +45,64 @@ pub(crate) struct ProbeResult {
     pub display_name: String,
 }
 
-/// The full structured result of a preflight phase. Returned by
-/// [`run_preflight`] so the orchestrator can both render results and emit
-/// a `JUnit` `<testsuite name="preflight">` element with the same data.
-pub(crate) struct PreflightOutcome {
+/// The Coordinator's verdict on a completed preflight phase. Carries only
+/// the bits the Coordinator needs to decide whether to continue or abort,
+/// keeping `ProbeResult` rendering data on the [`PreflightReport`] for the
+/// Reporter to consume separately.
+pub(crate) struct PreflightVerdict {
     /// `true` when at least one probe was declared (i.e. a `#[preflight]`
     /// was present and contained probes). When `false` the orchestrator
     /// must not emit a synthetic `JUnit` testsuite — there is nothing to
     /// report.
     pub declared: bool,
-    /// Per-probe results in declaration order. Empty when no probes were
-    /// declared.
-    pub results: Vec<ProbeResult>,
     /// `true` when every declared probe passed (or no probes were
     /// declared). `false` when at least one probe failed.
     pub passed: bool,
+    /// Number of probes that produced [`ProbeOutcome::Failed`]. Used by the
+    /// Coordinator to format the abort message; pre-computed by the runner
+    /// so both phase handlers stop re-deriving it.
+    pub failed_count: usize,
 }
 
-impl PreflightOutcome {
-    /// A no-op outcome representing "preflight did not run" (no
+/// The full structured result of a preflight phase. The Coordinator reads
+/// only [`Self::verdict`]; the `JUnit` Reporter is handed `&self.results`
+/// through `preflight_recorded`. Splitting the audiences narrows what the
+/// Coordinator imports from this module.
+pub(crate) struct PreflightReport {
+    pub verdict: PreflightVerdict,
+    /// Per-probe results in declaration order. Empty when no probes were
+    /// declared.
+    pub results: Vec<ProbeResult>,
+}
+
+impl PreflightReport {
+    /// A no-op report representing "preflight did not run" (no
     /// `#[preflight]` declared, or `--no-preflight` set). Distinguishable
-    /// from a passing preflight by `declared == false`.
+    /// from a passing preflight by `verdict.declared == false`.
     pub(crate) fn none() -> Self {
         Self {
-            declared: false,
+            verdict: PreflightVerdict {
+                declared: false,
+                passed: true,
+                failed_count: 0,
+            },
             results: Vec::new(),
-            passed: true,
         }
     }
 }
 
 /// Run the preflight phase, if one is declared.
 ///
-/// Returns a [`PreflightOutcome`] in every non-error case — the caller
+/// Returns a [`PreflightReport`] in every non-error case — the caller
 /// decides whether to abort (default), continue with failures recorded
 /// (`--continue-on-preflight-failure`), or print the table and exit
 /// (`--preflight-only`). Returns `Err` only when the suite's preflight is
 /// structurally invalid (e.g. duplicate `name+type+target`, a `custom`
 /// probe collision, or more than one `#[preflight]` per binary) — those
 /// are the operator-error cases that must abort regardless of any flag.
-pub(crate) async fn run_preflight() -> anyhow::Result<PreflightOutcome> {
+pub(crate) async fn run_preflight() -> anyhow::Result<PreflightReport> {
     if RIG_PREFLIGHT.is_empty() {
-        return Ok(PreflightOutcome::none());
+        return Ok(PreflightReport::none());
     }
     // `RIG_PREFLIGHT.len() <= 1` is asserted in the orchestrator before we
     // are called; index 0 is sound here.
@@ -117,10 +133,13 @@ pub(crate) async fn run_preflight() -> anyhow::Result<PreflightOutcome> {
         // `--preflight-only`'s success message) still get the same path
         // as a passing run.
         println_via(&multi, is_tty, "preflight result: 0 passed");
-        return Ok(PreflightOutcome {
-            declared: true,
+        return Ok(PreflightReport {
+            verdict: PreflightVerdict {
+                declared: true,
+                passed: true,
+                failed_count: 0,
+            },
             results: Vec::new(),
-            passed: true,
         });
     }
 
@@ -180,30 +199,25 @@ pub(crate) async fn run_preflight() -> anyhow::Result<PreflightOutcome> {
                 total_elapsed.as_secs_f64()
             ),
         );
-        return Ok(PreflightOutcome {
-            declared: true,
+        return Ok(PreflightReport {
+            verdict: PreflightVerdict {
+                declared: true,
+                passed: true,
+                failed_count: 0,
+            },
             results,
-            passed: true,
         });
     }
 
     render_readiness_table(&multi, is_tty, &results);
-    Ok(PreflightOutcome {
-        declared: true,
+    Ok(PreflightReport {
+        verdict: PreflightVerdict {
+            declared: true,
+            passed: false,
+            failed_count,
+        },
         results,
-        passed: false,
     })
-}
-
-/// Convenience for `PreflightOutcome::failed` callers that want the same
-/// abort message the runner used to produce. Kept as a free function (not
-/// a method) so callers can compose it with extra context like the test
-/// count without forcing the runner to know about test counts.
-pub(crate) fn format_abort_message(failed_count: usize, tests_total: usize) -> String {
-    format!(
-        "{failed_count} probe{plural} failed — aborting suite ({tests_total} tests not run)",
-        plural = if failed_count == 1 { "" } else { "s" },
-    )
 }
 
 /// Pre-create one spinner per probe in declaration order so the TTY
