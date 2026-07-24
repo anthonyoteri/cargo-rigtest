@@ -5,6 +5,21 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.6.0](https://github.com/anthonyoteri/cargo-rigtest/compare/405eece19493e2c0749c0533ad35e076e00a677a..v0.6.0) - 2026-07-24
+#### Features
+- (**cli**) --retries flag overrides every test's retry count for one run - ([21ca9c4](https://github.com/anthonyoteri/cargo-rigtest/commit/21ca9c462359e09c2a5bd465d7fa1997ad6a290b)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) retry only on specific error variants with retry_on_error - ([755e5ce](https://github.com/anthonyoteri/cargo-rigtest/commit/755e5cea0b6c186e2e7b7e820ff51a2be1f40768)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) distinguish flaky tests from clean passes in console output - ([bafd04d](https://github.com/anthonyoteri/cargo-rigtest/commit/bafd04d51c22e1d19a6c976f29ff3877fd5f72a8)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Documentation
+- switch to American English spellings - ([c539e72](https://github.com/anthonyoteri/cargo-rigtest/commit/c539e7207f320cfe608410fa947a188abf0c215d)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- anchor retry/flaky vocabulary and decision - ([405eece](https://github.com/anthonyoteri/cargo-rigtest/commit/405eece19493e2c0749c0533ad35e076e00a677a)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Refactoring
+- (**cargo-rigtest**) extract spawn_target and JunitCoordinator - ([27a264f](https://github.com/anthonyoteri/cargo-rigtest/commit/27a264fba7248d850629deb834d6ebb7ea02efeb)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) split PreflightOutcome into verdict + results - ([f6c1e5e](https://github.com/anthonyoteri/cargo-rigtest/commit/f6c1e5ed09d157e68ee1fc8c385b55811651e959)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) consolidate retry policy in retry::plan - ([160ab63](https://github.com/anthonyoteri/cargo-rigtest/commit/160ab63de880ea2de9dc515b7c438f642d700130)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.5.0](https://github.com/anthonyoteri/cargo-rigtest/compare/edf46bd28ab27fe24def611b68af412b52607aa0..v0.5.0) - 2026-06-22
 #### Features
 - (**macros**) add #[case] attribute for table-driven parametrized tests - ([6acc719](https://github.com/anthonyoteri/cargo-rigtest/commit/6acc719779a4bc5470d1f15494e7398b490dc2f3)) - [@anthonyoteri](https://github.com/anthonyoteri)
