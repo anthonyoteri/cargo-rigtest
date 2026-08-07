@@ -353,10 +353,24 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
     let mut skipped = 0usize;
     let mut join_set: JoinSet<Outcome> = JoinSet::new();
 
+    // One Semaphore(1) per distinct serial group present among the parallel
+    // cases. Same-group tasks acquire it so they never overlap; different
+    // groups hold different locks and stay concurrent.
+    let mut group_locks: std::collections::HashMap<&'static str, Arc<Semaphore>> =
+        std::collections::HashMap::new();
+    for tc in &parallel_cases {
+        if let Some(g) = tc.serial_group {
+            group_locks
+                .entry(g)
+                .or_insert_with(|| Arc::new(Semaphore::new(1)));
+        }
+    }
+
     for tc in parallel_cases {
         let runner = Arc::clone(&runner);
         let reporter = Arc::clone(&reporter);
         let semaphore = Arc::clone(&semaphore);
+        let group_lock = tc.serial_group.map(|g| Arc::clone(&group_locks[g]));
         let state_var = state_var.clone();
         let state_json = state_json.clone();
 
@@ -365,6 +379,14 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
                 .acquire()
                 .await
                 .expect("semaphore should not be closed");
+            let _group_permit = match &group_lock {
+                Some(lock) => Some(
+                    lock.acquire()
+                        .await
+                        .expect("group semaphore should not be closed"),
+                ),
+                None => None,
+            };
             let (outcome, _) = run_test(
                 &*runner,
                 &*reporter,
@@ -553,6 +575,7 @@ mod tests {
             "test_module",
             "test.rs",
             false,
+            None,
             None,
             0,
             false,
@@ -935,6 +958,12 @@ mod tests {
         Box::leak(Box::new(tc))
     }
 
+    fn leaked_group_case(name: &'static str, group: &'static str) -> &'static TestCase {
+        let mut tc = make_case(name);
+        tc.serial_group = Some(group);
+        Box::leak(Box::new(tc))
+    }
+
     /// Returns a pre-programmed outcome per test name; otherwise Passed.
     struct ByNameRunner {
         outcomes: HashMap<&'static str, SubprocessOutcome>,
@@ -1107,6 +1136,134 @@ mod tests {
         assert!(
             max >= 1,
             "expected some concurrency to be observed, got {max}"
+        );
+    }
+
+    /// Runner keyed by a test-name → group map. Tracks the max concurrency
+    /// observed *within* each group and the max concurrency observed overall.
+    struct GroupConcurrencyRunner {
+        groups: HashMap<&'static str, &'static str>,
+        active: Mutex<HashMap<&'static str, usize>>,
+        per_group_max: Mutex<HashMap<&'static str, usize>>,
+        overall_active: AtomicUsize,
+        overall_max: AtomicUsize,
+        /// Optional rendezvous: when set, every task blocks here after
+        /// recording its in-flight count and before releasing, so a
+        /// concurrency assertion is deterministic instead of timing-based.
+        /// Left `None` for the mutual-exclusion test, where a barrier would
+        /// deadlock (same-group tasks can never be in flight together).
+        rendezvous: Option<Arc<tokio::sync::Barrier>>,
+    }
+
+    impl GroupConcurrencyRunner {
+        fn new(groups: HashMap<&'static str, &'static str>) -> Self {
+            Self {
+                groups,
+                active: Mutex::new(HashMap::new()),
+                per_group_max: Mutex::new(HashMap::new()),
+                overall_active: AtomicUsize::new(0),
+                overall_max: AtomicUsize::new(0),
+                rendezvous: None,
+            }
+        }
+
+        fn with_rendezvous(groups: HashMap<&'static str, &'static str>, parties: usize) -> Self {
+            let mut runner = Self::new(groups);
+            runner.rendezvous = Some(Arc::new(tokio::sync::Barrier::new(parties)));
+            runner
+        }
+    }
+
+    impl SubprocessRunner for GroupConcurrencyRunner {
+        async fn run(
+            &self,
+            test_name: &str,
+            _state_var: &str,
+            _state_json: &str,
+            _timeout: Option<Duration>,
+        ) -> anyhow::Result<SubprocessOutcome> {
+            let group = *self.groups.get(test_name).expect("known test name");
+            {
+                let mut active = self.active.lock().unwrap();
+                let n = active.entry(group).or_insert(0);
+                *n += 1;
+                let now = *n;
+                let mut maxes = self.per_group_max.lock().unwrap();
+                let m = maxes.entry(group).or_insert(0);
+                *m = (*m).max(now);
+            }
+            let overall = self.overall_active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.overall_max.fetch_max(overall, Ordering::SeqCst);
+            // Every task has now recorded its in-flight count; block until all
+            // parties arrive so the overlap is provable, not timing-dependent.
+            if let Some(barrier) = &self.rendezvous {
+                barrier.wait().await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            self.overall_active.fetch_sub(1, Ordering::SeqCst);
+            *self.active.lock().unwrap().get_mut(group).unwrap() -= 1;
+            Ok(SubprocessOutcome::Passed)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dispatch_serial_group_is_mutually_exclusive() {
+        let groups: HashMap<&str, &str> = [("db1", "db"), ("db2", "db")].into_iter().collect();
+        let runner = Arc::new(GroupConcurrencyRunner::new(groups));
+        let reporter = Arc::new(NullReporter);
+        // Jobs high enough that only the group lock can serialize them.
+        let semaphore = Arc::new(Semaphore::new(4));
+
+        let cases = vec![
+            leaked_group_case("db1", "db"),
+            leaked_group_case("db2", "db"),
+        ];
+
+        let _ = dispatch_cases(
+            Arc::clone(&runner),
+            reporter,
+            "X".into(),
+            "{}".into(),
+            semaphore,
+            cases,
+            Vec::new(),
+            None,
+        )
+        .await;
+
+        let db_max = *runner.per_group_max.lock().unwrap().get("db").unwrap();
+        assert_eq!(db_max, 1, "same-group cases must never overlap");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dispatch_different_groups_run_concurrently() {
+        let groups: HashMap<&str, &str> = [("a1", "a"), ("b1", "b")].into_iter().collect();
+        // Two parties rendezvous: both cases must be simultaneously in flight
+        // to pass the barrier, so overall_max == 2 is guaranteed rather than
+        // depending on scheduler timing (which flakes on a loaded runner).
+        let runner = Arc::new(GroupConcurrencyRunner::with_rendezvous(groups, 2));
+        let reporter = Arc::new(NullReporter);
+        let semaphore = Arc::new(Semaphore::new(4));
+
+        let cases = vec![leaked_group_case("a1", "a"), leaked_group_case("b1", "b")];
+
+        let _ = dispatch_cases(
+            Arc::clone(&runner),
+            reporter,
+            "X".into(),
+            "{}".into(),
+            semaphore,
+            cases,
+            Vec::new(),
+            None,
+        )
+        .await;
+
+        let overall = runner.overall_max.load(Ordering::SeqCst);
+        assert!(
+            overall >= 2,
+            "different groups should run concurrently, got max {overall}"
         );
     }
 }

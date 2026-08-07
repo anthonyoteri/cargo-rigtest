@@ -110,7 +110,8 @@ Optional flags can be combined in any order:
 
 | Flag | Description |
 |------|-------------|
-| `serial` | Run this test exclusively — no other test runs concurrently with it |
+| `serial` | Run this test fully exclusively — no other test (including grouped tests) runs concurrently with it |
+| `serial = "group"` | Run this test in a named serial group — tests sharing a group name never overlap, while different groups (and ungrouped tests) still run in parallel |
 | `timeout = <Duration>` | Hard-kill the test subprocess and report failure if it exceeds the duration |
 | `retries = <N>` | Retry a failing test up to N additional times before reporting failure. A test that fails on one or more attempts but ultimately passes is rendered as `FLAKY` in the console (and counted in the `(N flaky)` summary parenthetical) — the run still exits `0`. |
 | `retry_on_error = <pat>` | Only retry when the typed `Err(_)` matches the pattern (same syntax as `matches!`); requires a concrete error type — see below |

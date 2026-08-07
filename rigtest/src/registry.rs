@@ -48,8 +48,15 @@ pub struct TestCase {
     pub file: &'static str,
     /// When `true` this test must not run concurrently with any other test.
     ///
-    /// Set by `#[testcase(serial)]`.
+    /// Set by bare `#[testcase(serial)]`. This is fully exclusive: the test
+    /// runs alone against everything, including grouped tests.
     pub serial: bool,
+    /// Named serial group. Tests sharing a group name never run concurrently
+    /// with each other, but different groups (and ungrouped tests) may run in
+    /// parallel.
+    ///
+    /// `None` for ungrouped tests. Set by `#[testcase(serial = "group")]`.
+    pub serial_group: Option<&'static str>,
     /// Kill the subprocess and record a failure if the test exceeds this duration.
     ///
     /// `None` means no timeout. Set by `#[testcase(timeout = Duration::from_secs(N))]`.
@@ -91,6 +98,7 @@ impl TestCase {
         module: &'static str,
         file: &'static str,
         serial: bool,
+        serial_group: Option<&'static str>,
         timeout: Option<std::time::Duration>,
         retries: u32,
         retry_on_error_set: bool,
@@ -102,6 +110,7 @@ impl TestCase {
             module,
             file,
             serial,
+            serial_group,
             timeout,
             retries,
             retry_on_error_set,

@@ -176,7 +176,8 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// | Flag | Description |
 /// |------|-------------|
-/// | `serial` | Prevents concurrent execution with any other test. |
+/// | `serial` | Fully exclusive: this test runs alone, never concurrently with any other test (including grouped tests). |
+/// | `serial = "group"` | Names a serial group. Tests sharing a group name never run concurrently with each other; different groups (and ungrouped tests) may run in parallel. The group name must be a string literal. |
 /// | `timeout = <Duration>` | Kills and fails the test if it exceeds the given duration. |
 /// | `retries = <N>` | Retries a failed test up to `N` additional times before reporting failure. |
 /// | `retry_on_error = <pat>` | Only retry when the test's typed `Err(_)` matches the pattern (same syntax as `matches!`). Requires the function to return `Result<(), ConcreteType>`. |
@@ -205,6 +206,23 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// // `retry_on_error` requires a concrete error type, not `rigtest::Error`.
 /// #[testcase(retry_on_error = _)]
 /// async fn no_box_dyn_error(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
+///     Ok(())
+/// }
+/// # fn main() {}
+/// ```
+///
+/// # Serial groups
+///
+/// A named serial group (`serial = "group"`) requires a string literal;
+/// a bare identifier or other expression is rejected at compile time.
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use rigtest::{testcase, TestContext};
+///
+/// // The group name must be a string literal, not a bare identifier.
+/// #[testcase(serial = db)]
+/// async fn bad_group(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
 ///     Ok(())
 /// }
 /// # fn main() {}
@@ -295,6 +313,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
 
     let TestcaseFlags {
         serial,
+        serial_group_tokens,
         timeout_tokens,
         retries_tokens,
         retry_on_error,
@@ -354,6 +373,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
                     module_path!(),
                     file!(),
                     #serial,
+                    #serial_group_tokens,
                     #timeout_tokens,
                     #retries_tokens,
                     #retry_on_error_set_tokens,
@@ -371,6 +391,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
         case_rows: &case_rows,
         case_param_positions: &case_param_positions,
         serial,
+        serial_group_tokens: &serial_group_tokens,
         timeout_tokens: &timeout_tokens,
         retries_tokens: &retries_tokens,
         retry_on_error: retry_on_error.as_ref(),
@@ -390,6 +411,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
 
 struct TestcaseFlags {
     serial: bool,
+    serial_group_tokens: proc_macro2::TokenStream,
     timeout_tokens: proc_macro2::TokenStream,
     retries_tokens: proc_macro2::TokenStream,
     /// When present, the user-supplied pattern from `retry_on_error = <pat>`.
@@ -403,6 +425,7 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
         .parse(attr)
         .unwrap_or_default();
     let mut serial = false;
+    let mut serial_group_tokens = quote! { None };
     let mut timeout_tokens = quote! { None };
     let mut retries_tokens = quote! { 0u32 };
     let mut retry_on_error: Option<syn::Pat> = None;
@@ -410,6 +433,10 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
     for meta in &metas {
         match meta {
             syn::Meta::Path(p) if p.is_ident("serial") => serial = true,
+            syn::Meta::NameValue(nv) if nv.path.is_ident("serial") => {
+                let group = parse_serial_group(&nv.value)?;
+                serial_group_tokens = quote! { Some(#group) };
+            }
             syn::Meta::NameValue(nv) if nv.path.is_ident("timeout") => {
                 let val = &nv.value;
                 timeout_tokens = quote! { Some(#val) };
@@ -429,11 +456,30 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
     }
     Ok(TestcaseFlags {
         serial,
+        serial_group_tokens,
         timeout_tokens,
         retries_tokens,
         retry_on_error,
         tags_tokens,
     })
+}
+
+/// Parse the value of `serial = "group"` as a string literal naming the
+/// serial group. A non-string value is rejected with a compile error so a
+/// typo like `serial = db` fails loudly rather than silently.
+fn parse_serial_group(value: &syn::Expr) -> syn::Result<syn::LitStr> {
+    if let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(s),
+        ..
+    }) = value
+    {
+        Ok(s.clone())
+    } else {
+        Err(syn::Error::new_spanned(
+            value,
+            "`serial` group must be a string literal, e.g. serial = \"db\"",
+        ))
+    }
 }
 
 /// Parse the value of `retry_on_error = <pat>` as a Rust pattern, the same
@@ -680,6 +726,7 @@ struct CaseRegistrationInputs<'a> {
     case_rows: &'a [CaseRow],
     case_param_positions: &'a [usize],
     serial: bool,
+    serial_group_tokens: &'a proc_macro2::TokenStream,
     timeout_tokens: &'a proc_macro2::TokenStream,
     retries_tokens: &'a proc_macro2::TokenStream,
     retry_on_error: Option<&'a syn::Pat>,
@@ -697,6 +744,7 @@ fn build_case_registrations(
         case_rows,
         case_param_positions,
         serial,
+        serial_group_tokens,
         timeout_tokens,
         retries_tokens,
         retry_on_error,
@@ -763,6 +811,7 @@ fn build_case_registrations(
                     module_path!(),
                     file!(),
                     #serial,
+                    #serial_group_tokens,
                     #timeout_tokens,
                     #retries_tokens,
                     #retry_on_error_set_tokens,
