@@ -263,7 +263,7 @@ rejected at compile time with an actionable message.
 | TCP | `Preflight::tcp(name, "host:port")` | 30 seconds | A TCP connection to the target establishes within the timeout |
 | Env | `Preflight::env(name, "VAR")` | n/a (synchronous) | The variable is set and non-empty (default) — or, with `.equals(value)`, equals `value` exactly |
 | DNS | `Preflight::dns(name, "host")` | 30 seconds | The host resolves to at least one A or AAAA record. `host` is a bare DNS name — no port |
-| HTTP¹ | `Preflight::http(name, "url")` | 30 seconds | A `GET url` returns a status in `200..=299` (default) — or in the range/value supplied via `.expect_status(...)` |
+| HTTP¹ | `Preflight::http(name, "url")` | 30 seconds | A `GET url` returns a status in `200..=299` (default) — or in the range/value supplied via `.expect_status(...)`. Send request headers (e.g. auth) with `.header(name, value)` |
 | SSH²  | `Preflight::ssh(name, "dest")` | 30 seconds | An SSH session establishes and the remote command (default `true`, override with `.command("...")`) exits 0 |
 | Custom | `Preflight::custom(name, \|\| async { ... })` | none (no framework-imposed deadline) | The async closure resolves to `Ok(())` |
 
@@ -298,6 +298,12 @@ kind.
 recently added HTTP probe. Accepts either a single `u16` (`.expect_status(204)`)
 or an inclusive range (`.expect_status(200..=204)`). No-op on probes of
 any other kind.
+
+`.header(name, value)` adds a request header to the most recently added
+HTTP probe (for example an auth header). Call it repeatedly to send
+several headers, in order. Header values are treated as secrets: the
+`Debug` rendering of a probe shows header names but redacts values.
+No-op on probes of any other kind.
 
 `.command(s)` overrides the remote command run by the most recently added
 SSH probe. The probe still requires exit status 0; only the command run

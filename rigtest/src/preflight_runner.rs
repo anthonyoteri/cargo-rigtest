@@ -419,7 +419,11 @@ async fn run_async_probe(p: &Probe) -> ProbeOutcome {
         }
         ProbeKind::Dns { host } => run_dns(host).await,
         #[cfg(feature = "http-client")]
-        ProbeKind::Http { url, expect } => run_http(url, expect, p.timeout).await,
+        ProbeKind::Http {
+            url,
+            expect,
+            headers,
+        } => run_http(url, expect, headers, p.timeout).await,
         #[cfg(all(feature = "ssh-client", unix))]
         ProbeKind::Ssh { dest, command } => run_ssh(dest, command).await,
         ProbeKind::Custom { run } => run_custom(run).await,
@@ -488,12 +492,16 @@ type HttpConfigurator =
 async fn run_http(
     url: &str,
     expect: &crate::preflight::ExpectStatus,
+    headers: &[(
+        std::borrow::Cow<'static, str>,
+        std::borrow::Cow<'static, str>,
+    )],
     deadline: Option<Duration>,
 ) -> ProbeOutcome {
     let configurator: Option<HttpConfigurator> = crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR
         .first()
         .map(|e| e.configure_fn);
-    run_http_with(url, expect, deadline, configurator).await
+    run_http_with(url, expect, headers, deadline, configurator).await
 }
 
 /// Internal: shared between the real probe and the unit tests, so the
@@ -507,6 +515,10 @@ async fn run_http(
 async fn run_http_with(
     url: &str,
     expect: &crate::preflight::ExpectStatus,
+    headers: &[(
+        std::borrow::Cow<'static, str>,
+        std::borrow::Cow<'static, str>,
+    )],
     deadline: Option<Duration>,
     configurator: Option<HttpConfigurator>,
 ) -> ProbeOutcome {
@@ -528,7 +540,11 @@ async fn run_http_with(
         Ok(c) => c,
         Err(e) => return ProbeOutcome::Failed(format!("building http client failed: {e}")),
     };
-    match client.get(url).send().await {
+    let mut request = client.get(url);
+    for (name, value) in headers {
+        request = request.header(name.as_ref(), value.as_ref());
+    }
+    match request.send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
             if expect.matches(status) {
@@ -897,12 +913,40 @@ mod tests {
         let outcome = run_http(
             url,
             &ExpectStatus::Range(200..=299),
+            &[],
             Some(Duration::from_secs(2)),
         )
         .await;
         assert!(
             matches!(outcome, ProbeOutcome::Passed),
             "expected pass, got {outcome:?}"
+        );
+    }
+
+    #[cfg(feature = "http-client")]
+    #[tokio::test]
+    async fn http_probe_sends_declared_header() {
+        use crate::preflight::ExpectStatus;
+        use std::borrow::Cow;
+        let mut server = spawn_oneshot_http(204).await;
+        let url: &'static str = Box::leak(format!("http://{}/", server.addr).into_boxed_str());
+        let headers: Vec<(Cow<'static, str>, Cow<'static, str>)> =
+            vec![(Cow::Borrowed("X-Test"), Cow::Borrowed("abc"))];
+        let outcome = run_http(
+            url,
+            &ExpectStatus::Exact(204),
+            &headers,
+            Some(Duration::from_secs(2)),
+        )
+        .await;
+        assert!(
+            matches!(outcome, ProbeOutcome::Passed),
+            "expected pass, got {outcome:?}"
+        );
+        let request = server.request.try_recv().expect("server recorded request");
+        assert!(
+            request.contains("x-test: abc") || request.contains("X-Test: abc"),
+            "declared header not sent; raw request was:\n{request}"
         );
     }
 
@@ -915,6 +959,7 @@ mod tests {
         let outcome = run_http(
             url,
             &ExpectStatus::Range(200..=299),
+            &[],
             Some(Duration::from_secs(2)),
         )
         .await;
@@ -932,7 +977,13 @@ mod tests {
         use crate::preflight::ExpectStatus;
         let server = spawn_oneshot_http(204).await;
         let url: &'static str = Box::leak(format!("http://{}/", server.addr).into_boxed_str());
-        let outcome = run_http(url, &ExpectStatus::Exact(204), Some(Duration::from_secs(2))).await;
+        let outcome = run_http(
+            url,
+            &ExpectStatus::Exact(204),
+            &[],
+            Some(Duration::from_secs(2)),
+        )
+        .await;
         assert!(matches!(outcome, ProbeOutcome::Passed));
     }
 
@@ -949,6 +1000,7 @@ mod tests {
         let outcome = run_http(
             url,
             &ExpectStatus::Range(200..=299),
+            &[],
             Some(Duration::from_millis(500)),
         )
         .await;
@@ -961,25 +1013,31 @@ mod tests {
     #[cfg(feature = "http-client")]
     struct OneshotHttpServer {
         addr: std::net::SocketAddr,
+        /// Resolves to the raw request bytes (request line + headers) the
+        /// single accepted connection sent, so tests can assert on what
+        /// the client actually put on the wire.
+        request: tokio::sync::oneshot::Receiver<String>,
     }
 
     /// Minimal HTTP/1.0 server that accepts exactly one connection, reads
-    /// until the request headers terminate, and writes a single status
-    /// line + `Content-Length: 0` body. Avoids pulling in `axum` or
-    /// `hyper` for what's effectively a one-line response.
+    /// until the request headers terminate, records the raw request bytes,
+    /// and writes a single status line + `Content-Length: 0` body. Avoids
+    /// pulling in `axum` or `hyper` for what's effectively a one-line
+    /// response.
     #[cfg(feature = "http-client")]
     async fn spawn_oneshot_http(status: u16) -> OneshotHttpServer {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            // Drain request headers — we don't care what the client
-            // sends, only that the connection completes.
+            // Capture the request headers so tests can assert on them.
             let mut buf = [0u8; 1024];
             // Read once; reqwest sends the full GET in a single packet
             // for these tests so a single read is sufficient.
-            let _ = stream.read(&mut buf).await;
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
             let reason = match status {
                 200 => "OK",
                 204 => "No Content",
@@ -992,7 +1050,7 @@ mod tests {
             let _ = stream.write_all(response.as_bytes()).await;
             let _ = stream.shutdown().await;
         });
-        OneshotHttpServer { addr }
+        OneshotHttpServer { addr, request: rx }
     }
 
     #[cfg(feature = "http-client")]
@@ -1002,6 +1060,7 @@ mod tests {
         let outcome = run_http(
             "not-a-valid-url",
             &ExpectStatus::Range(200..=299),
+            &[],
             Some(Duration::from_millis(500)),
         )
         .await;
@@ -1026,6 +1085,7 @@ mod tests {
         let outcome = run_http_with(
             "http://127.0.0.1:1/",
             &ExpectStatus::Range(200..=299),
+            &[],
             Some(Duration::from_millis(100)),
             Some(failing_configurator),
         )
@@ -1066,6 +1126,7 @@ mod tests {
             run_http_with(
                 "http://127.0.0.1:1/",
                 &ExpectStatus::Range(200..=299),
+                &[],
                 Some(Duration::from_millis(100)),
                 Some(failing_configurator),
             ),
