@@ -21,7 +21,7 @@ the rest of your code.
 | Captured output on failure       |     —      |       ✓       |       ✓       |
 | Per-test timeout / retries       |     —      |      ✓¹       |       ✓       |
 | Tag-based test filtering         |     —      |       —       |       ✓       |
-| Parametrized cases (`#[case]`)   |     —      |       —       |       ✓       |
+| Parametrized cases (`#[case]` / `#[values]`) | — |     —      |       ✓       |
 | Global setup / teardown          |     —      |       —       |       ✓       |
 | Per-test setup / teardown        |     —      |       —       |       ✓       |
 | Preflight environment checks     |     —      |       —       |       ✓       |
