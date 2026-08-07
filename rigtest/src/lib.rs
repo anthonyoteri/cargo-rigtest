@@ -158,6 +158,35 @@
 //! released regardless of how individual tests finish, including tests that
 //! time out.
 //!
+//! ## `#[fixture]`
+//!
+//! Defines a function-scoped fixture with automatic setup and optional
+//! teardown, injected into tests by parameter name. A test receives a fixture
+//! by declaring a parameter whose name matches the fixture and whose type is
+//! the fixture's returned value:
+//!
+//! ```no_run
+//! # use std::sync::Arc;
+//! # use rigtest::{fixture, testcase, TestContext};
+//! struct Db;
+//!
+//! #[fixture]
+//! async fn clean_db(_ctx: Arc<TestContext>) -> Result<Db, rigtest::Error> {
+//!     Ok(Db)
+//! }
+//!
+//! #[testcase]
+//! async fn uses_db(_ctx: Arc<TestContext>, clean_db: Db) -> Result<(), rigtest::Error> {
+//!     let _db = clean_db;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Setup runs before the test body and teardown (declared with
+//! `#[fixture(teardown = ...)]`) after it. With several fixtures on one test,
+//! setup is left-to-right and teardown is LIFO. Teardown does not run on panic
+//! or timeout. See [`fixture`] for the full contract.
+//!
 //! # Test context
 //!
 //! Every test receives an `Arc<`[`TestContext`]`>`. It exposes:
@@ -290,7 +319,7 @@ pub use openssh;
 pub use preflight::Preflight;
 #[cfg(feature = "http-client")]
 pub use reqwest;
-pub use rigtest_macros::{global_setup, global_teardown, main, preflight, testcase};
+pub use rigtest_macros::{fixture, global_setup, global_teardown, main, preflight, testcase};
 
 /// Convenient glob import for test files.
 ///
@@ -299,11 +328,11 @@ pub use rigtest_macros::{global_setup, global_teardown, main, preflight, testcas
 /// ```
 ///
 /// Brings into scope: [`TestContext`] and the attribute macros [`testcase`],
-/// [`global_setup`], [`global_teardown`], and [`main`].
+/// [`fixture`], [`global_setup`], [`global_teardown`], and [`main`].
 pub mod prelude {
     pub use crate::preflight::Preflight;
     pub use crate::TestContext;
-    pub use rigtest_macros::{global_setup, global_teardown, main, preflight, testcase};
+    pub use rigtest_macros::{fixture, global_setup, global_teardown, main, preflight, testcase};
 }
 
 /// Convenience alias for the error type used by test functions, setup, and

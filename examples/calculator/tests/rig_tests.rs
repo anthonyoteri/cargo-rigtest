@@ -96,6 +96,27 @@ async fn addition_is_commutative(
     Ok(())
 }
 
+// A `#[fixture]`: builds a fresh `Calculator` once per test that names it.
+// The value is injected by parameter name — no per-test setup boilerplate.
+#[fixture]
+async fn fresh_calc(
+    _ctx: Arc<TestContext>,
+) -> Result<calculator::Calculator, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(calculator::Calculator::new())
+}
+
+#[testcase]
+async fn fixture_injects_fresh_calculator(
+    _ctx: Arc<TestContext>,
+    fresh_calc: calculator::Calculator, // ← resolved from the fixture above
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut calc = fresh_calc;
+    calc.add(2, 3);
+    assert_eq!(calc.history().len(), 1);
+    assert_eq!(calc.history()[0], "2 + 3 = 5");
+    Ok(())
+}
+
 #[testcase]
 async fn divide_by_zero_returns_none(
     _ctx: Arc<TestContext>,
