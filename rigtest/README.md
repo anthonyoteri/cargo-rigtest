@@ -190,6 +190,38 @@ apply identically to every generated row. Non-`#[case]` parameters
 (typically `ctx: Arc<TestContext>`) are wired in as usual; only
 `#[case]`-tagged parameters receive per-row values.
 
+#### Matrix cases (`#[values]`)
+
+When you want *every combination* of a set of inputs rather than a
+hand-written table, tag the varying parameters with `#[values(...)]`.
+The macro expands the **cartesian product** across all `#[values]`
+parameters into one case per combination — each its own `TestCase`,
+its own subprocess, and its own row in the output and JUnit report.
+
+```rust
+#[testcase]
+async fn status_matrix(
+    _ctx: Arc<TestContext>,
+    #[values("GET", "POST", "PUT")] method: &str,
+    #[values(200, 404)] status: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // ... exercise `method` against an endpoint expecting `status` ...
+    Ok(())
+}
+```
+
+This registers `3 × 2 = 6` cases: `status_matrix::case_1_GET_200`,
+`status_matrix::case_2_GET_404`, `status_matrix::case_3_POST_200`, and
+so on. The `case_<N>` prefix is always present (so combinations can
+never collide) and is followed by a readable label built from the
+values. Case rows vary from the outside in — the last `#[values]`
+parameter varies fastest.
+
+`#[values]` composes with `#[case]`: stack `#[case(...)]` rows and tag
+other parameters with `#[values]`, and the generated set is the product
+of the rows and every values dimension. As with `#[case]`, all
+`#[testcase]` flags apply to every generated case.
+
 #### Tags
 
 Tag a test with one or more string labels, then subset the suite at the

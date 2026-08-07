@@ -83,6 +83,19 @@ async fn multiply_negative_numbers(
     Ok(())
 }
 
+// Cartesian `#[values]`: this one function expands into a case per
+// `(a, b)` combination — 3 × 2 = 6 independent cases, each in its own
+// subprocess — instead of six hand-written `#[case]` rows.
+#[testcase]
+async fn addition_is_commutative(
+    _ctx: Arc<TestContext>,
+    #[values(0, 7, -4)] a: i64,
+    #[values(1, 100)] b: i64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    assert_eq!(calculator::add(a, b), calculator::add(b, a));
+    Ok(())
+}
+
 #[testcase]
 async fn divide_by_zero_returns_none(
     _ctx: Arc<TestContext>,

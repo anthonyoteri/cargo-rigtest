@@ -349,6 +349,67 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `user_has_expected_role::case_2_viewer`. Non-`#[case]` parameters (for
 /// example `ctx`) are wired in as before; only `#[case]`-tagged parameters
 /// receive per-row values.
+///
+/// ## Value lists with `#[values]`
+///
+/// A parameter can instead be tagged `#[values(v1, v2, ...)]` to enumerate
+/// the values it should take. Every `#[values]` parameter is an independent
+/// dimension, and the generated cases are the **cartesian product** across
+/// all of them. Tagging the same parameter with both `#[case]` and
+/// `#[values]`, or writing an empty `#[values()]`, is a compile error.
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use rigtest::{testcase, TestContext};
+///
+/// #[testcase]
+/// async fn method_status(
+///     _ctx: Arc<TestContext>,
+///     #[values("GET", "POST", "PUT")] method: &str,
+///     #[values(200, 404)] status: u16,
+/// ) -> Result<(), rigtest::Error> {
+///     assert!(!method.is_empty());
+///     assert!(status >= 200);
+///     Ok(())
+/// }
+/// ```
+///
+/// This registers `3 × 2 = 6` cases. `#[case(...)]` rows and `#[values]`
+/// parameters compose: the case rows form the outermost dimension, then each
+/// `#[values]` parameter left-to-right (the last varying fastest).
+///
+/// Each generated case is named `<fn>::case_<N>_<label>`, where `<N>` is the
+/// 1-based index into the product and `<label>` is the sanitized,
+/// underscore-joined rendering of the varying values (case-row label first,
+/// then each chosen `#[values]` value with only `[A-Za-z0-9]` kept). When a
+/// combination yields no label fragments the suffix is just `case_<N>`.
+///
+/// An empty `#[values()]` is rejected at compile time:
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use rigtest::{testcase, TestContext};
+///
+/// // `#[values(...)]` must list at least one value.
+/// #[testcase]
+/// async fn empty_values(_ctx: Arc<TestContext>, #[values()] n: u8)
+///     -> Result<(), rigtest::Error> { Ok(()) }
+/// # fn main() {}
+/// ```
+///
+/// Tagging one parameter with both `#[case]` and `#[values]` is also
+/// rejected — a parameter belongs to exactly one dimension:
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use rigtest::{testcase, TestContext};
+///
+/// #[testcase]
+/// #[case(1)]
+/// async fn both_markers(_ctx: Arc<TestContext>, #[case] #[values(2)] n: u8)
+///     -> Result<(), rigtest::Error> { Ok(()) }
+/// # fn main() {}
+/// ```
 #[proc_macro_attribute]
 pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand_testcase(attr, item) {
@@ -390,27 +451,19 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
     }
     func.attrs = other_attrs;
 
-    // Identify which positional parameters are tagged `#[case]` and strip
-    // the marker so the re-emitted function compiles unchanged.
-    let mut case_param_positions: Vec<usize> = Vec::new();
-    for (idx, input) in func.sig.inputs.iter_mut().enumerate() {
-        if let FnArg::Typed(pat_type) = input {
-            let before = pat_type.attrs.len();
-            pat_type.attrs.retain(|a| !a.path().is_ident("case"));
-            if pat_type.attrs.len() != before {
-                case_param_positions.push(idx);
-            }
-        }
-    }
+    // Identify which positional parameters are tagged `#[case]` /
+    // `#[values(...)]` and strip the markers so the re-emitted function
+    // compiles unchanged.
+    let (case_param_positions, values_params) = collect_param_markers(&mut func)?;
 
     validate_case_shape(&func, &case_rows, &case_param_positions)?;
 
     let retry_on_error_set = retry_on_error.is_some();
     let retry_on_error_set_tokens = quote! { #retry_on_error_set };
 
-    // No `#[case]` markers and no `#[case(...)]` rows → preserve the
-    // historical single-test behavior exactly.
-    if case_rows.is_empty() {
+    // No `#[case]`/`#[values]` dimensions at all → preserve the historical
+    // single-test behavior exactly.
+    if case_rows.is_empty() && values_params.is_empty() {
         let static_ident = registration_ident(&func_name_str, None);
         let body = build_testcase_body(&func_ident, &[quote! { ctx }], retry_on_error.as_ref());
         let expanded = quote! {
@@ -443,6 +496,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
         func_name_str: &func_name_str,
         case_rows: &case_rows,
         case_param_positions: &case_param_positions,
+        values_params: &values_params,
         serial,
         serial_group_tokens: &serial_group_tokens,
         no_timeout,
@@ -793,6 +847,7 @@ struct CaseRegistrationInputs<'a> {
     func_name_str: &'a str,
     case_rows: &'a [CaseRow],
     case_param_positions: &'a [usize],
+    values_params: &'a [ValuesParam],
     serial: bool,
     serial_group_tokens: &'a proc_macro2::TokenStream,
     no_timeout: bool,
@@ -801,6 +856,39 @@ struct CaseRegistrationInputs<'a> {
     retry_on_error: Option<&'a syn::Pat>,
     retry_on_error_set_tokens: &'a proc_macro2::TokenStream,
     tags_tokens: &'a proc_macro2::TokenStream,
+}
+
+/// Build the positional call arguments for one generated case: `#[case]`
+/// values slot into their tagged positions, each `#[values]` value into its
+/// position, and `ctx` fills the (at most one) remaining position.
+fn build_case_call_args(
+    func: &ItemFn,
+    case_param_positions: &[usize],
+    values_params: &[ValuesParam],
+    case_entry: Option<&CaseRow>,
+    tuple: &[usize],
+) -> Result<Vec<proc_macro2::TokenStream>, syn::Error> {
+    let mut call_args: Vec<proc_macro2::TokenStream> = Vec::with_capacity(func.sig.inputs.len());
+    let mut case_value_iter = case_entry.map(|r| r.values.iter());
+    for idx in 0..func.sig.inputs.len() {
+        if case_param_positions.contains(&idx) {
+            let Some(val) = case_value_iter.as_mut().and_then(Iterator::next) else {
+                // Length already validated by `validate_case_shape`; reaching
+                // this branch would be an internal invariant break.
+                return Err(syn::Error::new(
+                    case_entry.map_or_else(Span::call_site, |r| r.span),
+                    "internal error: case row value count mismatch",
+                ));
+            };
+            call_args.push(quote! { #val });
+        } else if let Some(pos) = values_params.iter().position(|p| p.position == idx) {
+            let val = &values_params[pos].values[tuple[pos]];
+            call_args.push(quote! { #val });
+        } else {
+            call_args.push(quote! { ctx });
+        }
+    }
+    Ok(call_args)
 }
 
 fn build_case_registrations(
@@ -812,6 +900,7 @@ fn build_case_registrations(
         func_name_str,
         case_rows,
         case_param_positions,
+        values_params,
         serial,
         serial_group_tokens,
         no_timeout,
@@ -821,78 +910,128 @@ fn build_case_registrations(
         retry_on_error_set_tokens,
         tags_tokens,
     } = inputs;
-    // Reject more than one non-case parameter so the error fires at macro
-    // expansion rather than as a confusing type mismatch later.
-    let non_case_positions: Vec<usize> = (0..func.sig.inputs.len())
-        .filter(|i| !case_param_positions.contains(i))
+    // Reject more than one parameter that is neither `#[case]`- nor
+    // `#[values]`-tagged so the error fires at macro expansion rather than
+    // as a confusing type mismatch later.
+    let extra_positions: Vec<usize> = (0..func.sig.inputs.len())
+        .filter(|i| {
+            !case_param_positions.contains(i) && !values_params.iter().any(|p| p.position == *i)
+        })
         .collect();
-    if non_case_positions.len() > 1 {
+    if extra_positions.len() > 1 {
         let span = func
             .sig
             .inputs
             .iter()
-            .nth(non_case_positions[1])
+            .nth(extra_positions[1])
             .map_or_else(Span::call_site, Spanned::span);
         return Err(syn::Error::new(
             span,
-            "parametrized #[testcase] supports at most one non-#[case] parameter \
+            "parametrized #[testcase] supports at most one non-#[case]/non-#[values] parameter \
              (the `ctx: Arc<TestContext>` argument)",
         ));
     }
 
-    let mut registrations = Vec::with_capacity(case_rows.len());
-    for (i, row) in case_rows.iter().enumerate() {
-        let index = i + 1;
-        let suffix = match &row.label {
-            Some(label) => format!("case_{index}_{label}"),
-            None => format!("case_{index}"),
-        };
-        let case_name = format!("{func_name_str}::{suffix}");
-        let static_ident = registration_ident(func_name_str, Some(&suffix));
+    // Case rows form the outermost dimension; a single implicit empty entry
+    // stands in when there are no `#[case]` rows. Each `#[values]` param is
+    // a further dimension, iterated left-to-right with the last varying
+    // fastest.
+    let case_entries: Vec<Option<&CaseRow>> = if case_rows.is_empty() {
+        vec![None]
+    } else {
+        case_rows.iter().map(Some).collect()
+    };
+    let value_tuples = value_index_tuples(values_params);
 
-        // Build the positional call: case values slot into the tagged
-        // positions, `ctx` fills the (at most one) remaining position.
-        let mut call_args: Vec<proc_macro2::TokenStream> =
-            Vec::with_capacity(func.sig.inputs.len());
-        let mut value_iter = row.values.iter();
-        for idx in 0..func.sig.inputs.len() {
-            if case_param_positions.contains(&idx) {
-                let Some(val) = value_iter.next() else {
-                    // Length already validated by `validate_case_shape`; reaching
-                    // this branch would be an internal invariant break.
-                    return Err(syn::Error::new(
-                        row.span,
-                        "internal error: case row value count mismatch",
-                    ));
-                };
-                call_args.push(quote! { #val });
-            } else {
-                call_args.push(quote! { ctx });
+    let mut registrations =
+        Vec::with_capacity(case_entries.len().saturating_mul(value_tuples.len()));
+    let mut index = 0usize;
+    for case_entry in &case_entries {
+        for tuple in &value_tuples {
+            index += 1;
+
+            // Assemble the label from the case-row label (if any) followed
+            // by each varying value's sanitized rendering.
+            let mut label_parts: Vec<String> = Vec::new();
+            if let Some(label) = case_entry.and_then(|r| r.label.clone()) {
+                label_parts.push(label);
             }
-        }
+            for (param, &vi) in values_params.iter().zip(tuple) {
+                let part = sanitize_value(&param.values[vi]);
+                if !part.is_empty() {
+                    label_parts.push(part);
+                }
+            }
+            let suffix = if label_parts.is_empty() {
+                format!("case_{index}")
+            } else {
+                format!("case_{index}_{}", label_parts.join("_"))
+            };
+            let case_name = format!("{func_name_str}::{suffix}");
+            let static_ident = registration_ident(func_name_str, Some(&suffix));
 
-        let body = build_testcase_body(func_ident, &call_args, retry_on_error);
-        registrations.push(quote! {
-            #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
-            #[linkme(crate = ::rigtest::__linkme)]
-            static #static_ident: ::rigtest::registry::TestCase =
-                ::rigtest::registry::TestCase::new(
-                    #case_name,
-                    module_path!(),
-                    file!(),
-                    #serial,
-                    #serial_group_tokens,
-                    #timeout_tokens,
-                    #no_timeout,
-                    #retries_tokens,
-                    #retry_on_error_set_tokens,
-                    #tags_tokens,
-                    |ctx| ::std::boxed::Box::pin(async move { #body }),
-                );
-        });
+            let call_args = build_case_call_args(
+                func,
+                case_param_positions,
+                values_params,
+                *case_entry,
+                tuple,
+            )?;
+            let body = build_testcase_body(func_ident, &call_args, retry_on_error);
+            registrations.push(quote! {
+                #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
+                #[linkme(crate = ::rigtest::__linkme)]
+                static #static_ident: ::rigtest::registry::TestCase =
+                    ::rigtest::registry::TestCase::new(
+                        #case_name,
+                        module_path!(),
+                        file!(),
+                        #serial,
+                        #serial_group_tokens,
+                        #timeout_tokens,
+                        #no_timeout,
+                        #retries_tokens,
+                        #retry_on_error_set_tokens,
+                        #tags_tokens,
+                        |ctx| ::std::boxed::Box::pin(async move { #body }),
+                    );
+            });
+        }
     }
 
     Ok(registrations)
+}
+
+/// Enumerate the cartesian product of value indices across `#[values]`
+/// params, left-to-right with the last param varying fastest. Returns a
+/// single empty tuple when there are no values params, so the caller's
+/// case-row loop still runs once per case entry.
+fn value_index_tuples(params: &[ValuesParam]) -> Vec<Vec<usize>> {
+    let mut tuples: Vec<Vec<usize>> = vec![Vec::new()];
+    for param in params {
+        let mut next = Vec::with_capacity(tuples.len().saturating_mul(param.values.len()));
+        for prefix in &tuples {
+            for i in 0..param.values.len() {
+                let mut combo = prefix.clone();
+                combo.push(i);
+                next.push(combo);
+            }
+        }
+        tuples = next;
+    }
+    tuples
+}
+
+/// Render a value expression's tokens and keep only ASCII alphanumerics,
+/// producing a name-safe label fragment (`"GET"` → `GET`, `200` → `200`,
+/// `Method::Get` → `MethodGet`). Returns an empty string when nothing
+/// survives, in which case the caller drops the fragment.
+fn sanitize_value(expr: &Expr) -> String {
+    quote! { #expr }
+        .to_string()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect()
 }
 
 /// Generate the async body for the registered test wrapper. Without
@@ -944,6 +1083,77 @@ struct CaseRow {
     values: Vec<Expr>,
     /// Span of the original attribute, used for diagnostics.
     span: Span,
+}
+
+/// Scan the function signature for `#[case]` and `#[values(...)]` parameter
+/// markers, stripping them so the re-emitted function compiles, and return
+/// the tagged `#[case]` positions plus the parsed `#[values]` dimensions.
+/// A parameter tagged with both markers, or an empty `#[values()]`, is a
+/// compile error.
+fn collect_param_markers(func: &mut ItemFn) -> Result<(Vec<usize>, Vec<ValuesParam>), syn::Error> {
+    let mut case_param_positions: Vec<usize> = Vec::new();
+    let mut values_params: Vec<ValuesParam> = Vec::new();
+    for (idx, input) in func.sig.inputs.iter_mut().enumerate() {
+        let FnArg::Typed(pat_type) = input else {
+            continue;
+        };
+        let mut is_case = false;
+        let mut values: Option<Vec<Expr>> = None;
+        let mut kept = Vec::with_capacity(pat_type.attrs.len());
+        for a in pat_type.attrs.drain(..) {
+            if a.path().is_ident("case") {
+                is_case = true;
+            } else if a.path().is_ident("values") {
+                values = Some(parse_values_attr(&a)?);
+            } else {
+                kept.push(a);
+            }
+        }
+        pat_type.attrs = kept;
+        if is_case && values.is_some() {
+            return Err(syn::Error::new(
+                pat_type.span(),
+                "a parameter cannot be tagged with both #[case] and #[values]; \
+                 choose one dimension for it",
+            ));
+        }
+        if is_case {
+            case_param_positions.push(idx);
+        }
+        if let Some(values) = values {
+            values_params.push(ValuesParam {
+                position: idx,
+                values,
+            });
+        }
+    }
+    Ok((case_param_positions, values_params))
+}
+
+/// A parameter tagged `#[values(expr, expr, ...)]`. Each such parameter is
+/// one dimension of the cartesian product; the generated cases visit every
+/// value in `values`.
+struct ValuesParam {
+    /// Positional index of the parameter in the function signature.
+    position: usize,
+    /// The value expressions listed in the attribute (guaranteed non-empty).
+    values: Vec<Expr>,
+}
+
+/// Parse a `#[values(expr, expr, ...)]` attribute into its list of value
+/// expressions. An empty list is a compile error.
+fn parse_values_attr(attr: &syn::Attribute) -> Result<Vec<Expr>, syn::Error> {
+    let values = attr
+        .parse_args_with(Punctuated::<Expr, Token![,]>::parse_terminated)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return Err(syn::Error::new(
+            attr.span(),
+            "#[values(...)] must list at least one value",
+        ));
+    }
+    Ok(values)
 }
 
 /// Recognize `#[case(...)]` / `#[case::label(...)]` attributes and parse
