@@ -113,6 +113,7 @@ Optional flags can be combined in any order:
 | `serial` | Run this test fully exclusively — no other test (including grouped tests) runs concurrently with it |
 | `serial = "group"` | Run this test in a named serial group — tests sharing a group name never overlap, while different groups (and ungrouped tests) still run in parallel |
 | `timeout = <Duration>` | Hard-kill the test subprocess and report failure if it exceeds the duration |
+| `no_timeout` | Opt this test out of any suite-wide `default_timeout`, forcing no timeout. Cannot be combined with `timeout` |
 | `retries = <N>` | Retry a failing test up to N additional times before reporting failure. A test that fails on one or more attempts but ultimately passes is rendered as `FLAKY` in the console (and counted in the `(N flaky)` summary parenthetical) — the run still exits `0`. |
 | `retry_on_error = <pat>` | Only retry when the typed `Err(_)` matches the pattern (same syntax as `matches!`); requires a concrete error type — see below |
 | `tags = ["smoke", …]` | Attach string tags for use with the `--tag` / `--not-tag` CLI filters |
@@ -141,6 +142,11 @@ async fn deploys_eventually(_ctx: Arc<TestContext>) -> Result<(), MyError> {
     Ok(())
 }
 ```
+
+A suite-wide default timeout can be declared once on the entry point with
+`#[rigtest::main(default_timeout = std::time::Duration::from_secs(60))]`. It
+applies to every test that does not set its own `timeout`. A per-test
+`timeout` overrides it, and `no_timeout` opts a test out entirely.
 
 > **Note on timeout and teardown:** when a timeout fires, the subprocess is
 > terminated — on Linux and macOS a graceful signal is sent first, with a

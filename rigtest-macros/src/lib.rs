@@ -43,6 +43,22 @@ use syn::Type;
 /// }
 /// ```
 ///
+/// With a suite-wide default timeout applied to every test that does not set
+/// its own `timeout` (and is not marked `#[testcase(no_timeout)]`):
+///
+/// ```ignore
+/// #[rigtest::main(default_timeout = std::time::Duration::from_secs(60))]
+/// fn main() {}
+/// ```
+///
+/// # Suite-wide default timeout
+///
+/// `default_timeout = <expr>` takes any expression evaluating to a
+/// `std::time::Duration` and applies it to every test case as a fallback
+/// timeout. Precedence: a per-case `#[testcase(timeout = …)]` overrides the
+/// default; `#[testcase(no_timeout)]` forces no timeout even when a default
+/// is set. At most one `default_timeout` may be declared per test binary.
+///
 /// # HTTP client configure function
 ///
 /// The function named by `http_client` must have the signature:
@@ -108,6 +124,7 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut http_client_fn: Option<syn::Expr> = None;
     let mut ssh_client_fn: Option<syn::Expr> = None;
+    let mut default_timeout_expr: Option<syn::Expr> = None;
 
     for meta in &metas {
         match meta {
@@ -117,10 +134,13 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
             syn::Meta::NameValue(nv) if nv.path.is_ident("ssh_client") => {
                 ssh_client_fn = Some(nv.value.clone());
             }
+            syn::Meta::NameValue(nv) if nv.path.is_ident("default_timeout") => {
+                default_timeout_expr = Some(nv.value.clone());
+            }
             other => {
                 return syn::Error::new_spanned(
                     other,
-                    "unknown parameter for #[rigtest::main]; expected `http_client = <fn>` or `ssh_client = <fn>`",
+                    "unknown parameter for #[rigtest::main]; expected `http_client = <fn>`, `ssh_client = <fn>`, or `default_timeout = <Duration>`",
                 )
                 .to_compile_error()
                 .into();
@@ -147,6 +167,15 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
+    let default_timeout_static = default_timeout_expr.map(|timeout| {
+        quote! {
+            #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_DEFAULT_TIMEOUT)]
+            #[linkme(crate = ::rigtest::__linkme)]
+            static __RIGTEST_DEFAULT_TIMEOUT: ::rigtest::registry::DefaultTimeoutEntry =
+                ::rigtest::registry::DefaultTimeoutEntry::new(#timeout);
+        }
+    });
+
     let expanded = quote! {
         fn main() {
             ::rigtest::run_main();
@@ -154,6 +183,7 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #http_static
         #ssh_static
+        #default_timeout_static
     };
     TokenStream::from(expanded)
 }
@@ -179,9 +209,30 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// | `serial` | Fully exclusive: this test runs alone, never concurrently with any other test (including grouped tests). |
 /// | `serial = "group"` | Names a serial group. Tests sharing a group name never run concurrently with each other; different groups (and ungrouped tests) may run in parallel. The group name must be a string literal. |
 /// | `timeout = <Duration>` | Kills and fails the test if it exceeds the given duration. |
+/// | `no_timeout` | Opts this test out of any suite-wide `default_timeout`, forcing no timeout. Cannot be combined with `timeout = …`. |
 /// | `retries = <N>` | Retries a failed test up to `N` additional times before reporting failure. |
 /// | `retry_on_error = <pat>` | Only retry when the test's typed `Err(_)` matches the pattern (same syntax as `matches!`). Requires the function to return `Result<(), ConcreteType>`. |
 /// | `tags = ["a", "b"]` | Attaches one or more string tags for use with the `--tag` and `--not-tag` CLI filters. |
+///
+/// # Timeout precedence
+///
+/// A per-case `timeout = …` always wins. When a suite-wide
+/// `#[rigtest::main(default_timeout = …)]` is declared it applies to every
+/// test that does not set its own `timeout`; `no_timeout` opts a test out of
+/// that default entirely (forcing no timeout). Combining `no_timeout` with
+/// `timeout = …` is a compile error:
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use std::time::Duration;
+/// use rigtest::{testcase, TestContext};
+///
+/// #[testcase(no_timeout, timeout = Duration::from_secs(1))]
+/// async fn conflicting(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
+///     Ok(())
+/// }
+/// # fn main() {}
+/// ```
 ///
 /// # The `retry_on_error` matcher
 ///
@@ -314,6 +365,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
     let TestcaseFlags {
         serial,
         serial_group_tokens,
+        no_timeout,
         timeout_tokens,
         retries_tokens,
         retry_on_error,
@@ -375,6 +427,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
                     #serial,
                     #serial_group_tokens,
                     #timeout_tokens,
+                    #no_timeout,
                     #retries_tokens,
                     #retry_on_error_set_tokens,
                     #tags_tokens,
@@ -392,6 +445,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
         case_param_positions: &case_param_positions,
         serial,
         serial_group_tokens: &serial_group_tokens,
+        no_timeout,
         timeout_tokens: &timeout_tokens,
         retries_tokens: &retries_tokens,
         retry_on_error: retry_on_error.as_ref(),
@@ -412,6 +466,7 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
 struct TestcaseFlags {
     serial: bool,
     serial_group_tokens: proc_macro2::TokenStream,
+    no_timeout: bool,
     timeout_tokens: proc_macro2::TokenStream,
     retries_tokens: proc_macro2::TokenStream,
     /// When present, the user-supplied pattern from `retry_on_error = <pat>`.
@@ -426,6 +481,8 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
         .unwrap_or_default();
     let mut serial = false;
     let mut serial_group_tokens = quote! { None };
+    let mut no_timeout = false;
+    let mut timeout_set = false;
     let mut timeout_tokens = quote! { None };
     let mut retries_tokens = quote! { 0u32 };
     let mut retry_on_error: Option<syn::Pat> = None;
@@ -437,8 +494,10 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
                 let group = parse_serial_group(&nv.value)?;
                 serial_group_tokens = quote! { Some(#group) };
             }
+            syn::Meta::Path(p) if p.is_ident("no_timeout") => no_timeout = true,
             syn::Meta::NameValue(nv) if nv.path.is_ident("timeout") => {
                 let val = &nv.value;
+                timeout_set = true;
                 timeout_tokens = quote! { Some(#val) };
             }
             syn::Meta::NameValue(nv) if nv.path.is_ident("retries") => {
@@ -454,9 +513,18 @@ fn parse_testcase_flags(attr: TokenStream) -> Result<TestcaseFlags, syn::Error> 
             _ => {}
         }
     }
+    if no_timeout && timeout_set {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[testcase]: `no_timeout` cannot be combined with `timeout = …`; \
+             `no_timeout` forces no timeout (opting out of any suite-wide default), \
+             while `timeout` sets an explicit one — pick one",
+        ));
+    }
     Ok(TestcaseFlags {
         serial,
         serial_group_tokens,
+        no_timeout,
         timeout_tokens,
         retries_tokens,
         retry_on_error,
@@ -727,6 +795,7 @@ struct CaseRegistrationInputs<'a> {
     case_param_positions: &'a [usize],
     serial: bool,
     serial_group_tokens: &'a proc_macro2::TokenStream,
+    no_timeout: bool,
     timeout_tokens: &'a proc_macro2::TokenStream,
     retries_tokens: &'a proc_macro2::TokenStream,
     retry_on_error: Option<&'a syn::Pat>,
@@ -745,6 +814,7 @@ fn build_case_registrations(
         case_param_positions,
         serial,
         serial_group_tokens,
+        no_timeout,
         timeout_tokens,
         retries_tokens,
         retry_on_error,
@@ -813,6 +883,7 @@ fn build_case_registrations(
                     #serial,
                     #serial_group_tokens,
                     #timeout_tokens,
+                    #no_timeout,
                     #retries_tokens,
                     #retry_on_error_set_tokens,
                     #tags_tokens,
