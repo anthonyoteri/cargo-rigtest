@@ -10,7 +10,9 @@ use tokio::task::JoinSet;
 
 use crate::junit::{JunitConfig, JunitReporter};
 use crate::preflight_runner::{run_preflight, PreflightReport};
-use crate::registry::{RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_PREFLIGHT, RIG_TEST_CASES};
+use crate::registry::{
+    RIG_DEFAULT_TIMEOUT, RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_PREFLIGHT, RIG_TEST_CASES,
+};
 use crate::reporter::{MultiReporter, Reporter, TestEventReporter, TestRef};
 use crate::scheduler::RuntimeArgs;
 use crate::subprocess::{OsSubprocessRunner, SubprocessRunner};
@@ -266,6 +268,22 @@ enum Outcome {
     Failed,
 }
 
+/// Compute the timeout that actually applies to `tc`.
+///
+/// Precedence: a per-case explicit `timeout` wins over the suite-wide
+/// `default_timeout`; `no_timeout` forces no timeout even when a default is
+/// set. With neither in play, the suite default (if any) applies.
+fn effective_timeout(
+    tc: &crate::registry::TestCase,
+    suite_default: Option<Duration>,
+) -> Option<Duration> {
+    if tc.no_timeout {
+        None
+    } else {
+        tc.timeout.or(suite_default)
+    }
+}
+
 /// Run a test with retries, returning the final outcome and updating the
 /// reporter.
 ///
@@ -281,17 +299,19 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     state_var: &str,
     state_json: &str,
     retries_override: Option<usize>,
+    suite_default_timeout: Option<Duration>,
 ) -> (Outcome, Duration) {
     let tref = test_ref(tc);
     reporter.test_started(tref);
     let test_start = Instant::now();
+    let timeout = effective_timeout(tc, suite_default_timeout);
     let effective_retries =
         retries_override.map_or(tc.retries, |n| u32::try_from(n).unwrap_or(u32::MAX));
     let max_attempts = effective_retries.saturating_add(1);
     let mut attempt_start = Instant::now();
 
     for attempt in 1..=max_attempts {
-        let raw = runner.run(tc.name, state_var, state_json, tc.timeout).await;
+        let raw = runner.run(tc.name, state_var, state_json, timeout).await;
 
         let is_last = attempt == max_attempts;
         let duration = test_start.elapsed();
@@ -348,6 +368,7 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
     parallel_cases: Vec<&'static crate::registry::TestCase>,
     serial_cases: Vec<&'static crate::registry::TestCase>,
     retries_override: Option<usize>,
+    suite_default_timeout: Option<Duration>,
 ) -> (usize, usize) {
     let mut passed = 0usize;
     let mut skipped = 0usize;
@@ -394,6 +415,7 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
                 &state_var,
                 &state_json,
                 retries_override,
+                suite_default_timeout,
             )
             .await;
             outcome
@@ -417,6 +439,7 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
             &state_var,
             &state_json,
             retries_override,
+            suite_default_timeout,
         )
         .await;
         match outcome {
@@ -429,18 +452,10 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
     (passed, skipped)
 }
 
-/// Run the full test suite (coordinator path).
-///
-/// # Errors
-///
-/// Returns an error if any test fails or if the current executable path
-/// cannot be determined.
-///
-/// # Panics
-///
-/// Panics if more than one `#[global_setup]` or `#[global_teardown]` function
-/// is registered.
-pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
+/// Assert that every "at most one" registration slice holds zero or one
+/// entry. Any violation is a build-time wiring mistake (two `#[global_setup]`
+/// functions, two `default_timeout` declarations, …) that must fail loudly.
+fn assert_singleton_registrations() {
     assert!(
         RIG_PREFLIGHT.len() <= 1,
         "cargo-rigtest: at most one #[preflight] function may be defined, found {}",
@@ -456,6 +471,11 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
         "cargo-rigtest: at most one #[global_teardown] function may be defined, found {}",
         RIG_GLOBAL_TEARDOWN.len()
     );
+    assert!(
+        RIG_DEFAULT_TIMEOUT.len() <= 1,
+        "cargo-rigtest: at most one #[rigtest::main(default_timeout = …)] may be defined, found {}",
+        RIG_DEFAULT_TIMEOUT.len()
+    );
     #[cfg(feature = "http-client")]
     assert!(
         crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR.len() <= 1,
@@ -468,6 +488,22 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
         "cargo-rigtest: at most one #[rigtest::main(ssh_client = …)] may be defined, found {}",
         crate::registry::RIG_SSH_CLIENT_CONFIGURATOR.len()
     );
+}
+
+/// Run the full test suite (coordinator path).
+///
+/// # Errors
+///
+/// Returns an error if any test fails or if the current executable path
+/// cannot be determined.
+///
+/// # Panics
+///
+/// Panics if more than one singleton registration is declared — that is,
+/// more than one `#[preflight]`, `#[global_setup]`, `#[global_teardown]`,
+/// `default_timeout`, or client configurator.
+pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
+    assert_singleton_registrations();
 
     let mut rng = rand::rng();
     let seed = args.seed.unwrap_or_else(|| rng.random::<u64>());
@@ -528,6 +564,7 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
         cases.into_iter().partition(|tc| tc.serial);
 
     let retries_override = args.retries;
+    let suite_default_timeout = RIG_DEFAULT_TIMEOUT.first().map(|e| e.timeout);
 
     let (passed, skipped) = dispatch_cases(
         runner,
@@ -538,6 +575,7 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
         parallel_cases,
         serial_cases,
         retries_override,
+        suite_default_timeout,
     )
     .await;
 
@@ -577,6 +615,7 @@ mod tests {
             false,
             None,
             None,
+            false,
             0,
             false,
             &[],
@@ -591,6 +630,36 @@ mod tests {
         let mut tc = make_case(name);
         tc.tags = tags;
         tc
+    }
+
+    // ── effective_timeout precedence ─────────────────────────────────────
+
+    #[test]
+    fn effective_timeout_uses_suite_default_when_no_per_case() {
+        let tc = make_case("t");
+        let default = Some(Duration::from_secs(5));
+        assert_eq!(effective_timeout(&tc, default), default);
+    }
+
+    #[test]
+    fn effective_timeout_per_case_wins_over_default() {
+        let mut tc = make_case("t");
+        tc.timeout = Some(Duration::from_secs(1));
+        let out = effective_timeout(&tc, Some(Duration::from_secs(5)));
+        assert_eq!(out, Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn effective_timeout_no_timeout_forces_none() {
+        let mut tc = make_case("t");
+        tc.no_timeout = true;
+        assert_eq!(effective_timeout(&tc, Some(Duration::from_secs(5))), None);
+    }
+
+    #[test]
+    fn effective_timeout_none_when_nothing_set() {
+        let tc = make_case("t");
+        assert_eq!(effective_timeout(&tc, None), None);
     }
 
     #[test]
@@ -779,7 +848,7 @@ mod tests {
         let tc = case_with_retries("flaky", 1);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -791,7 +860,7 @@ mod tests {
         let tc = case_with_retries("skipper", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
 
         assert!(matches!(outcome, Outcome::Skipped));
         assert_eq!(runner.call_count(), 1);
@@ -807,7 +876,7 @@ mod tests {
         let tc = case_with_retries("always_fails", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 3); // initial + 2 retries
@@ -821,7 +890,7 @@ mod tests {
         let tc = case_with_retry_on_error("strict_matcher", 5);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(
@@ -840,7 +909,7 @@ mod tests {
         let tc = case_with_retry_on_error("flaky_with_matcher", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -852,7 +921,7 @@ mod tests {
         let tc = case_with_retry_on_error("times_out_matcher", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(
@@ -871,7 +940,7 @@ mod tests {
         let tc = case_with_retries("times_out_then_passes", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -888,7 +957,7 @@ mod tests {
         let tc = case_with_retries("override_total", 0);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(5)).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(5), None).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 3);
@@ -901,7 +970,7 @@ mod tests {
         let tc = case_with_retries("strict_run", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(0)).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(0), None).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 1);
@@ -916,7 +985,7 @@ mod tests {
         // Even with the operator bumping to 10 retries, a non-matching
         // error must still fail-fast — the override replaces the count
         // but not the matcher.
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(10)).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(10), None).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 1);
@@ -933,7 +1002,7 @@ mod tests {
         let tc = case_with_retries("flaky", 1);
         let reporter = RecordingReporter::new();
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         let events = reporter.events();
@@ -1011,6 +1080,7 @@ mod tests {
             cases,
             Vec::new(),
             None,
+            None,
         )
         .await;
 
@@ -1042,6 +1112,7 @@ mod tests {
             semaphore,
             parallel,
             serial,
+            None,
             None,
         )
         .await;
@@ -1124,6 +1195,7 @@ mod tests {
             semaphore,
             cases,
             Vec::new(),
+            None,
             None,
         )
         .await;
@@ -1229,6 +1301,7 @@ mod tests {
             cases,
             Vec::new(),
             None,
+            None,
         )
         .await;
 
@@ -1256,6 +1329,7 @@ mod tests {
             semaphore,
             cases,
             Vec::new(),
+            None,
             None,
         )
         .await;

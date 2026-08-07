@@ -109,6 +109,7 @@ mod tests {
             serial: false,
             serial_group: None,
             timeout: None,
+            no_timeout: false,
             retries: 0,
             retry_on_error_set,
             tags: &[],

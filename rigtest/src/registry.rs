@@ -59,8 +59,17 @@ pub struct TestCase {
     pub serial_group: Option<&'static str>,
     /// Kill the subprocess and record a failure if the test exceeds this duration.
     ///
-    /// `None` means no timeout. Set by `#[testcase(timeout = Duration::from_secs(N))]`.
+    /// `None` means no per-case timeout; a suite-wide `default_timeout` (if
+    /// set via `#[rigtest::main(default_timeout = …)]`) still applies unless
+    /// [`no_timeout`](TestCase::no_timeout) is set. Set by
+    /// `#[testcase(timeout = Duration::from_secs(N))]`.
     pub timeout: Option<std::time::Duration>,
+    /// When `true` this test opts out of any suite-wide `default_timeout`,
+    /// forcing no timeout even if a default exists.
+    ///
+    /// Set by `#[testcase(no_timeout)]`. It is a compile error to combine
+    /// `no_timeout` with `timeout = …`.
+    pub no_timeout: bool,
     /// Retry a failed test up to this many additional times before reporting failure.
     ///
     /// `0` means no retries (the test runs exactly once). Set by
@@ -100,6 +109,7 @@ impl TestCase {
         serial: bool,
         serial_group: Option<&'static str>,
         timeout: Option<std::time::Duration>,
+        no_timeout: bool,
         retries: u32,
         retry_on_error_set: bool,
         tags: &'static [&'static str],
@@ -112,6 +122,7 @@ impl TestCase {
             serial,
             serial_group,
             timeout,
+            no_timeout,
             retries,
             retry_on_error_set,
             tags,
@@ -237,6 +248,42 @@ impl PreflightEntry {
 }
 
 unsafe impl Sync for PreflightEntry {}
+
+/// A suite-wide default timeout registered via
+/// `#[rigtest::main(default_timeout = <expr>)]`.
+///
+/// At most one entry may exist per test binary. When present, the runtime
+/// applies [`timeout`](DefaultTimeoutEntry::timeout) to every test case that
+/// does not set its own `timeout` and is not marked `#[testcase(no_timeout)]`.
+///
+/// Fields may be added in future releases. The `#[non_exhaustive]` attribute
+/// prevents external code from constructing this struct via struct literal
+/// syntax — use `#[rigtest::main(default_timeout = ...)]`.
+#[non_exhaustive]
+pub struct DefaultTimeoutEntry {
+    /// The default duration applied to cases without their own timeout.
+    pub timeout: std::time::Duration,
+}
+
+impl DefaultTimeoutEntry {
+    /// Constructs a [`DefaultTimeoutEntry`]. Intended for use by the
+    /// `#[rigtest::main]` proc macro; not part of the stable public API.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(timeout: std::time::Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+// linkme requires Sync
+unsafe impl Sync for DefaultTimeoutEntry {}
+
+/// At most one suite-wide default timeout, registered via
+/// `#[rigtest::main(default_timeout = <expr>)]`.
+///
+/// The runtime asserts at startup that this slice contains zero or one element.
+#[linkme::distributed_slice]
+pub static RIG_DEFAULT_TIMEOUT: [DefaultTimeoutEntry];
 
 /// All test cases discovered at compile time via `#[testcase]`.
 ///
