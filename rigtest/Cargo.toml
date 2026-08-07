@@ -36,7 +36,7 @@ libc = { workspace = true }
 openssh = { workspace = true, optional = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "=3.27.0"
 
 [features]
 http-client = ["reqwest"]

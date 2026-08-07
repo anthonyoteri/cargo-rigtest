@@ -25,4 +25,4 @@ serde_json = { workspace = true }
 quick-junit = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "=3.27.0"
