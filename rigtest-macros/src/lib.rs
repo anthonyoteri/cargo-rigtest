@@ -200,6 +200,11 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// lifecycle hooks. The function name becomes the test name that appears in
 /// output and `--filter` expressions.
 ///
+/// Any parameter that is neither the `Arc<TestContext>` argument nor a
+/// `#[case]` parameter is resolved as a [`fixture`] by name: its identifier
+/// must match a `#[fixture]` in scope, and it receives that fixture's
+/// returned value. See [`fixture`] for setup/teardown semantics.
+///
 /// # Flags
 ///
 /// All flags are optional and can be combined in any order.
@@ -461,11 +466,17 @@ fn expand_testcase(attr: TokenStream, item: TokenStream) -> Result<TokenStream, 
     let retry_on_error_set = retry_on_error.is_some();
     let retry_on_error_set_tokens = quote! { #retry_on_error_set };
 
-    // No `#[case]`/`#[values]` dimensions at all → preserve the historical
-    // single-test behavior exactly.
+    // No `#[case]`/`#[values]` dimensions → single test. The parameters are
+    // classified into the ctx argument and any fixture arguments; a lone
+    // `Arc<TestContext>` param keeps the historical single-test behavior
+    // byte-for-byte.
     if case_rows.is_empty() && values_params.is_empty() {
         let static_ident = registration_ident(&func_name_str, None);
-        let body = build_testcase_body(&func_ident, &[quote! { ctx }], retry_on_error.as_ref());
+        let classes = classify_params(&func, &[], &[])?;
+        let fixtures = fixture_idents(&classes);
+        let call_args = build_call_args(&classes, &[], &[], &[], !fixtures.is_empty());
+        let inner = build_testcase_body(&func_ident, &call_args, retry_on_error.as_ref());
+        let body = wrap_fixtures(&inner, &fixtures);
         let expanded = quote! {
             #[allow(clippy::unused_async)]
             #func
@@ -858,39 +869,6 @@ struct CaseRegistrationInputs<'a> {
     tags_tokens: &'a proc_macro2::TokenStream,
 }
 
-/// Build the positional call arguments for one generated case: `#[case]`
-/// values slot into their tagged positions, each `#[values]` value into its
-/// position, and `ctx` fills the (at most one) remaining position.
-fn build_case_call_args(
-    func: &ItemFn,
-    case_param_positions: &[usize],
-    values_params: &[ValuesParam],
-    case_entry: Option<&CaseRow>,
-    tuple: &[usize],
-) -> Result<Vec<proc_macro2::TokenStream>, syn::Error> {
-    let mut call_args: Vec<proc_macro2::TokenStream> = Vec::with_capacity(func.sig.inputs.len());
-    let mut case_value_iter = case_entry.map(|r| r.values.iter());
-    for idx in 0..func.sig.inputs.len() {
-        if case_param_positions.contains(&idx) {
-            let Some(val) = case_value_iter.as_mut().and_then(Iterator::next) else {
-                // Length already validated by `validate_case_shape`; reaching
-                // this branch would be an internal invariant break.
-                return Err(syn::Error::new(
-                    case_entry.map_or_else(Span::call_site, |r| r.span),
-                    "internal error: case row value count mismatch",
-                ));
-            };
-            call_args.push(quote! { #val });
-        } else if let Some(pos) = values_params.iter().position(|p| p.position == idx) {
-            let val = &values_params[pos].values[tuple[pos]];
-            call_args.push(quote! { #val });
-        } else {
-            call_args.push(quote! { ctx });
-        }
-    }
-    Ok(call_args)
-}
-
 fn build_case_registrations(
     inputs: &CaseRegistrationInputs<'_>,
 ) -> Result<Vec<proc_macro2::TokenStream>, syn::Error> {
@@ -910,27 +888,14 @@ fn build_case_registrations(
         retry_on_error_set_tokens,
         tags_tokens,
     } = inputs;
-    // Reject more than one parameter that is neither `#[case]`- nor
-    // `#[values]`-tagged so the error fires at macro expansion rather than
-    // as a confusing type mismatch later.
-    let extra_positions: Vec<usize> = (0..func.sig.inputs.len())
-        .filter(|i| {
-            !case_param_positions.contains(i) && !values_params.iter().any(|p| p.position == *i)
-        })
-        .collect();
-    if extra_positions.len() > 1 {
-        let span = func
-            .sig
-            .inputs
-            .iter()
-            .nth(extra_positions[1])
-            .map_or_else(Span::call_site, Spanned::span);
-        return Err(syn::Error::new(
-            span,
-            "parametrized #[testcase] supports at most one non-#[case]/non-#[values] parameter \
-             (the `ctx: Arc<TestContext>` argument)",
-        ));
-    }
+    // Classify each parameter into the ctx argument, a `#[case]` value, a
+    // `#[values]` value, or a fixture (wired in by name — see
+    // `wrap_fixtures`). `#[case]`/`#[values]` parameters receive their
+    // per-combination values; `classify_params` also rejects a second
+    // `Arc<TestContext>` and unsupported parameter shapes.
+    let classes = classify_params(func, case_param_positions, values_params)?;
+    let fixtures = fixture_idents(&classes);
+    let has_fixtures = !fixtures.is_empty();
 
     // Case rows form the outermost dimension; a single implicit empty entry
     // stands in when there are no `#[case]` rows. Each `#[values]` param is
@@ -970,14 +935,13 @@ fn build_case_registrations(
             let case_name = format!("{func_name_str}::{suffix}");
             let static_ident = registration_ident(func_name_str, Some(&suffix));
 
-            let call_args = build_case_call_args(
-                func,
-                case_param_positions,
-                values_params,
-                *case_entry,
-                tuple,
-            )?;
-            let body = build_testcase_body(func_ident, &call_args, retry_on_error);
+            // Positional call: `#[case]` values from this row, `#[values]`
+            // values from this combination, fixtures by name, and `ctx`.
+            let case_values: &[Expr] = case_entry.map_or(&[], |r| r.values.as_slice());
+            let call_args =
+                build_call_args(&classes, case_values, values_params, tuple, has_fixtures);
+            let inner = build_testcase_body(func_ident, &call_args, retry_on_error);
+            let body = wrap_fixtures(&inner, &fixtures);
             registrations.push(quote! {
                 #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
                 #[linkme(crate = ::rigtest::__linkme)]
@@ -1071,6 +1035,184 @@ fn build_testcase_body(
     } else {
         quote! { #func_ident(#(#call_args),*).await }
     }
+}
+
+/// How a single `#[testcase]` parameter is wired into the generated wrapper.
+enum ParamClass {
+    /// The `ctx: Arc<TestContext>` argument.
+    Ctx,
+    /// A `#[case]`-tagged parameter receiving a per-row value.
+    Case,
+    /// A `#[values(...)]`-tagged parameter. Carries its index into the
+    /// `values_params` slice so the per-combination value can be looked up.
+    Values(usize),
+    /// A fixture parameter, resolved by name against the same-named unit
+    /// struct emitted by `#[fixture]`. Carries the parameter identifier.
+    Fixture(syn::Ident),
+}
+
+/// Classify every parameter of a `#[testcase]` function.
+///
+/// A parameter is a `#[case]` value when its position is in
+/// `case_positions`; otherwise it is the ctx argument when its type is
+/// `Arc<…TestContext>` (at most one is permitted), and otherwise it is a
+/// fixture argument named by its identifier. This keeps the historical
+/// contract — a lone `Arc<TestContext>` parameter is always the ctx
+/// argument, never a fixture.
+fn classify_params(
+    func: &ItemFn,
+    case_positions: &[usize],
+    values_params: &[ValuesParam],
+) -> Result<Vec<ParamClass>, syn::Error> {
+    let mut classes = Vec::with_capacity(func.sig.inputs.len());
+    let mut ctx_seen = false;
+    for (idx, input) in func.sig.inputs.iter().enumerate() {
+        if case_positions.contains(&idx) {
+            classes.push(ParamClass::Case);
+            continue;
+        }
+        if let Some(vi) = values_params.iter().position(|p| p.position == idx) {
+            classes.push(ParamClass::Values(vi));
+            continue;
+        }
+        let FnArg::Typed(pat_type) = input else {
+            return Err(syn::Error::new_spanned(
+                input,
+                "#[testcase] functions cannot take a `self` parameter",
+            ));
+        };
+        if type_is_arc_test_context(&pat_type.ty) {
+            if ctx_seen {
+                return Err(syn::Error::new_spanned(
+                    input,
+                    "#[testcase] accepts at most one `Arc<TestContext>` parameter",
+                ));
+            }
+            ctx_seen = true;
+            classes.push(ParamClass::Ctx);
+        } else {
+            let Pat::Ident(pat_ident) = pat_type.pat.as_ref() else {
+                return Err(syn::Error::new_spanned(
+                    &pat_type.pat,
+                    "#[testcase] fixture parameter must be a plain identifier that names a \
+                     #[fixture] in scope (patterns such as tuples or `_` are not supported)",
+                ));
+            };
+            classes.push(ParamClass::Fixture(pat_ident.ident.clone()));
+        }
+    }
+    Ok(classes)
+}
+
+/// Collect the fixture parameter identifiers in declaration order.
+fn fixture_idents(classes: &[ParamClass]) -> Vec<syn::Ident> {
+    classes
+        .iter()
+        .filter_map(|c| match c {
+            ParamClass::Fixture(ident) => Some(ident.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Build the positional argument list for the call to the user's test
+/// function. `#[case]` positions consume `case_values` left-to-right, the
+/// ctx position becomes `ctx` (or a clone when fixtures are present, since
+/// the wrapper still needs `ctx` for teardown), and fixture positions pass
+/// the local bound by [`wrap_fixtures`].
+fn build_call_args(
+    classes: &[ParamClass],
+    case_values: &[Expr],
+    values_params: &[ValuesParam],
+    tuple: &[usize],
+    has_fixtures: bool,
+) -> Vec<proc_macro2::TokenStream> {
+    let ctx_arg = if has_fixtures {
+        quote! { ::std::sync::Arc::clone(&ctx) }
+    } else {
+        quote! { ctx }
+    };
+    let mut case_iter = case_values.iter();
+    classes
+        .iter()
+        .map(|class| match class {
+            ParamClass::Ctx => ctx_arg.clone(),
+            ParamClass::Fixture(ident) => quote! { #ident },
+            ParamClass::Values(vi) => {
+                let val = &values_params[*vi].values[tuple[*vi]];
+                quote! { #val }
+            }
+            ParamClass::Case => {
+                // Length is validated by `validate_case_shape`; a missing
+                // value here would be an internal invariant break, so fall
+                // back to a token that surfaces as a compile error rather
+                // than silently dropping an argument.
+                case_iter.next().map_or_else(
+                    || quote! { compile_error!("internal error: case value count mismatch") },
+                    |val| quote! { #val },
+                )
+            }
+        })
+        .collect()
+}
+
+/// Wrap `inner` (a `Result<(), BoxError>`-valued expression) in fixture
+/// setup/teardown scopes. Fixtures are set up left-to-right and torn down
+/// in LIFO order; a teardown error is surfaced only when the body
+/// succeeded, otherwise the body's error wins. Setup uses `?`, so a fixture
+/// whose setup fails aborts before the body runs and does not trigger
+/// teardown of fixtures set up earlier.
+fn wrap_fixtures(
+    inner: &proc_macro2::TokenStream,
+    fixtures: &[syn::Ident],
+) -> proc_macro2::TokenStream {
+    let mut acc = inner.clone();
+    for ident in fixtures.iter().rev() {
+        acc = quote! {{
+            let #ident = #ident::__rigtest_fixture_setup(::std::sync::Arc::clone(&ctx)).await?;
+            let __rigtest_body_result: ::core::result::Result<
+                (),
+                ::std::boxed::Box<dyn ::std::error::Error + ::std::marker::Send + ::std::marker::Sync>,
+            > = { #acc };
+            let __rigtest_teardown_result =
+                #ident::__rigtest_fixture_teardown(::std::sync::Arc::clone(&ctx)).await;
+            match __rigtest_body_result {
+                ::core::result::Result::Ok(()) => {
+                    __rigtest_teardown_result?;
+                    ::core::result::Result::Ok(())
+                }
+                ::core::result::Result::Err(__rigtest_body_err) => {
+                    ::core::result::Result::Err(__rigtest_body_err)
+                }
+            }
+        }};
+    }
+    acc
+}
+
+/// Returns true when `ty` is `Arc<…TestContext>` — matched structurally by
+/// an outer `Arc` whose sole type argument's path ends in `TestContext`.
+fn type_is_arc_test_context(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else { return false };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    if seg.ident != "Arc" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return false;
+    };
+    args.args.iter().any(|arg| {
+        let syn::GenericArgument::Type(Type::Path(inner)) = arg else {
+            return false;
+        };
+        inner
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "TestContext")
+    })
 }
 
 /// A parsed `#[case(...)]` / `#[case::label(...)]` row.
@@ -1183,6 +1325,251 @@ fn parse_case_attr(attr: &syn::Attribute) -> Option<Result<CaseRow, syn::Error>>
         }),
         Err(e) => Err(e),
     })
+}
+
+/// Defines a function-scoped test fixture with automatic setup and optional
+/// teardown, injected into `#[testcase]` functions by parameter name.
+///
+/// A fixture centralizes the "arrange" step of a test — resetting a
+/// database, provisioning a temporary directory, seeding a queue — so many
+/// tests can share it without repeating the code. Each test that names the
+/// fixture as a parameter receives the fixture's returned value; the setup
+/// runs just before the test body and the teardown just after.
+///
+/// # Signatures
+///
+/// The annotated function must be `async` and return `Result<T, E>`, where
+/// `T` is the value injected into tests and `E` is any error type that
+/// converts into the test's boxed error via `?` — the same constraint a
+/// test body's error type satisfies. It takes either no parameters or a
+/// single `ctx: Arc<TestContext>`:
+///
+/// ```text
+/// async fn name() -> Result<T, E> { ... }
+/// async fn name(ctx: Arc<TestContext>) -> Result<T, E> { ... }
+/// ```
+///
+/// The `ctx` argument gives the fixture access to the global setup data and
+/// the per-test lifecycle helpers, exactly as in a `#[testcase]`.
+///
+/// # Injection by parameter name
+///
+/// A test receives a fixture by declaring a parameter whose **name** matches
+/// the fixture and whose type is the fixture's `T`. Any `#[testcase]`
+/// parameter that is neither the `Arc<TestContext>` argument nor a `#[case]`
+/// parameter is resolved as a fixture by name:
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use rigtest::{fixture, testcase, TestContext};
+///
+/// struct Db;
+///
+/// #[fixture]
+/// async fn clean_db(_ctx: Arc<TestContext>) -> Result<Db, rigtest::Error> {
+///     // reset state and hand back a handle
+///     Ok(Db)
+/// }
+///
+/// #[testcase]
+/// async fn uses_db(_ctx: Arc<TestContext>, clean_db: Db) -> Result<(), rigtest::Error> {
+///     // `clean_db` is the value returned by the fixture's setup
+///     let _db = clean_db;
+///     Ok(())
+/// }
+/// ```
+///
+/// Because a fixture resolves through an item named exactly like the
+/// parameter, a test only needs that name in scope (a normal `use`), so
+/// fixtures defined in one module work in tests in another.
+///
+/// # Teardown
+///
+/// Pass `teardown = <path>` to run cleanup after the test body. The teardown
+/// function is `async fn(Arc<TestContext>) -> Result<(), E>` with the same
+/// error type `E` as the fixture:
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use rigtest::{fixture, TestContext};
+///
+/// struct Db;
+///
+/// async fn drop_db(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
+///     Ok(())
+/// }
+///
+/// #[fixture(teardown = drop_db)]
+/// async fn clean_db(_ctx: Arc<TestContext>) -> Result<Db, rigtest::Error> {
+///     Ok(Db)
+/// }
+/// ```
+///
+/// When several fixtures are injected into one test they are set up
+/// left-to-right and torn down in LIFO order (right-to-left). If the body
+/// succeeds but a teardown fails, the teardown error fails the test; if the
+/// body already failed, the body's error is reported and teardown errors are
+/// ignored.
+///
+/// # v1 limitations
+///
+/// - Fixtures are **function-scoped**: setup and teardown run for every test
+///   that names the fixture, once per test.
+/// - The teardown function does **not** receive the fixture value.
+/// - Teardown does **not** run when the test panics or is killed by a
+///   `timeout` — the subprocess is terminated first. Use `#[global_teardown]`
+///   for cleanup that must happen regardless of outcome.
+/// - A fixture whose setup fails (returns `Err`) aborts the test before the
+///   body runs; fixtures set up earlier in that test are not torn down.
+/// - Fixtures cannot depend on other fixtures.
+/// - A teardown failure on a test that also declares `retry_on_error` does
+///   not pass through that matcher — it is treated as an ordinary
+///   retry-eligible failure.
+///
+/// # Compile errors
+///
+/// The annotated function must be `async`, return `Result<T, E>`, and take
+/// either no parameters or a single `Arc<TestContext>`. Other shapes are
+/// rejected with an actionable message pointing at the offending span.
+#[proc_macro_attribute]
+pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match expand_fixture(attr, item) {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_fixture(attr: TokenStream, item: TokenStream) -> Result<TokenStream, syn::Error> {
+    let func: ItemFn = syn::parse(item)?;
+    let teardown = parse_fixture_teardown(attr)?;
+
+    if func.sig.asyncness.is_none() {
+        return Err(syn::Error::new_spanned(
+            &func.sig,
+            "#[fixture] functions must be `async`. Expected one of:\n  \
+             async fn name() -> Result<T, E>\n  \
+             async fn name(ctx: Arc<TestContext>) -> Result<T, E>",
+        ));
+    }
+
+    let return_ty = match &func.sig.output {
+        ReturnType::Default => {
+            return Err(syn::Error::new_spanned(
+                &func.sig,
+                "#[fixture] functions must return `Result<T, E>` — `T` is the value \
+                 injected into tests and `E` is the error type",
+            ));
+        }
+        ReturnType::Type(_, ty) => ty.as_ref(),
+    };
+    let err_ty = result_err_type(return_ty).ok_or_else(|| {
+        syn::Error::new_spanned(
+            return_ty,
+            "#[fixture] functions must return `Result<T, E>` — `T` is the value \
+             injected into tests and `E` is the error type",
+        )
+    })?;
+
+    // The fixture takes either no parameter or a single `Arc<TestContext>`.
+    // The generated setup always accepts `ctx`; when the fixture declares
+    // its own ctx parameter we re-emit it verbatim so the body's references
+    // resolve, otherwise we supply an ignored one.
+    let setup_param = match func.sig.inputs.len() {
+        0 => quote! { _ctx: ::std::sync::Arc<::rigtest::TestContext> },
+        1 => {
+            let arg = func.sig.inputs.first().expect("len == 1");
+            let FnArg::Typed(pat_type) = arg else {
+                return Err(syn::Error::new_spanned(
+                    arg,
+                    "#[fixture] functions cannot take a `self` parameter. Expected:\n  \
+                     async fn name(ctx: Arc<TestContext>) -> Result<T, E>",
+                ));
+            };
+            if !type_is_arc_test_context(&pat_type.ty) {
+                return Err(syn::Error::new_spanned(
+                    &pat_type.ty,
+                    "#[fixture] parameter must be `Arc<TestContext>`. Expected one of:\n  \
+                     async fn name() -> Result<T, E>\n  \
+                     async fn name(ctx: Arc<TestContext>) -> Result<T, E>",
+                ));
+            }
+            quote! { #arg }
+        }
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &func.sig.inputs,
+                "#[fixture] functions accept at most one parameter. Expected one of:\n  \
+                 async fn name() -> Result<T, E>\n  \
+                 async fn name(ctx: Arc<TestContext>) -> Result<T, E>",
+            ));
+        }
+    };
+
+    let vis = &func.vis;
+    let ident = &func.sig.ident;
+    let body = &func.block;
+
+    let teardown_fn = if let Some(path) = teardown {
+        quote! {
+            #vis async fn __rigtest_fixture_teardown(
+                ctx: ::std::sync::Arc<::rigtest::TestContext>,
+            ) -> ::core::result::Result<(), #err_ty> {
+                #path(ctx).await
+            }
+        }
+    } else {
+        quote! {
+            #[allow(clippy::unused_async)]
+            #vis async fn __rigtest_fixture_teardown(
+                _ctx: ::std::sync::Arc<::rigtest::TestContext>,
+            ) -> ::core::result::Result<(), #err_ty> {
+                ::core::result::Result::Ok(())
+            }
+        }
+    };
+
+    // Emit a non-unit (empty braced) struct rather than a unit struct: a
+    // bare identifier that resolves to a *unit* struct is parsed as a
+    // pattern, which would break both the test's fixture parameter binding
+    // (`clean_db: Db`) and the wrapper's `let clean_db = …`. An empty braced
+    // struct keeps `clean_db` usable as an ordinary binding while
+    // `clean_db::__rigtest_fixture_setup` still resolves the associated fn.
+    let expanded = quote! {
+        #[allow(non_camel_case_types)]
+        #[doc(hidden)]
+        #vis struct #ident {}
+
+        #[allow(non_camel_case_types)]
+        impl #ident {
+            #[allow(clippy::unused_async)]
+            #vis async fn __rigtest_fixture_setup(#setup_param) -> #return_ty #body
+
+            #teardown_fn
+        }
+    };
+    Ok(TokenStream::from(expanded))
+}
+
+/// Parse the `#[fixture]` attribute arguments. The only accepted argument is
+/// `teardown = <path>`, naming an `async fn(Arc<TestContext>) -> Result<(), E>`.
+fn parse_fixture_teardown(attr: TokenStream) -> Result<Option<syn::Expr>, syn::Error> {
+    let metas = Punctuated::<syn::Meta, Token![,]>::parse_terminated.parse(attr)?;
+    let mut teardown: Option<syn::Expr> = None;
+    for meta in &metas {
+        match meta {
+            syn::Meta::NameValue(nv) if nv.path.is_ident("teardown") => {
+                teardown = Some(nv.value.clone());
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "unknown argument for #[fixture]; the only supported argument is \
+                     `teardown = <path to an async fn(Arc<TestContext>) -> Result<(), E>>`",
+                ));
+            }
+        }
+    }
+    Ok(teardown)
 }
 
 /// Registers an async function as the global setup hook for a test binary.

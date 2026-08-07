@@ -436,6 +436,49 @@ async fn creates_a_record(
 }
 ```
 
+### Fixtures (`#[fixture]`)
+
+When the same per-test arrange recurs across many cases — resetting a
+backend to a known baseline, opening a connection — declare it once as a
+`#[fixture]` and request it by parameter name. Any `#[testcase]`
+parameter that is neither `ctx: Arc<TestContext>` nor a `#[case]`/
+`#[values]` parameter is resolved to the `#[fixture]` of the same name
+and receives its returned value:
+
+```rust
+use rigtest::prelude::*;
+
+#[fixture]
+async fn clean_db(ctx: Arc<TestContext>) -> Result<Db, rigtest::Error> {
+    let db = Db::connect(ctx.global::<State>()).await?;
+    db.reset_to_baseline().await?;   // runs before every test that asks
+    Ok(db)
+}
+
+#[testcase]
+async fn insert_then_count(
+    _ctx: Arc<TestContext>,
+    clean_db: Db,               // ← injected by name from the fixture above
+) -> Result<(), rigtest::Error> {
+    clean_db.insert("hello").await?;
+    assert_eq!(clean_db.count().await?, 1);
+    Ok(())
+}
+```
+
+A fixture may take no arguments or a single `ctx: Arc<TestContext>`, and
+declares optional cleanup with `#[fixture(teardown = release)]` naming an
+`async fn(Arc<TestContext>) -> Result<(), E>`. When a test requests
+several fixtures they set up left-to-right before the body and tear down
+in reverse (LIFO) after it. Fixtures resolve by ordinary name, so a
+fixture defined in another module or crate works once it is in scope via
+`use`, and fixtures compose with `#[case]` parametrization.
+
+This version is function-scoped: teardown does not receive the fixture
+value and does not run on panic or timeout (use `#[global_teardown]` for
+cleanup that must happen regardless of outcome), and fixtures cannot
+depend on other fixtures.
+
 ---
 
 ## Skipping tests
