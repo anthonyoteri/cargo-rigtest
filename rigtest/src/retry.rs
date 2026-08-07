@@ -107,6 +107,7 @@ mod tests {
             module: "m",
             file: "f",
             serial: false,
+            serial_group: None,
             timeout: None,
             retries: 0,
             retry_on_error_set,
