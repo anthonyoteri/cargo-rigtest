@@ -419,11 +419,7 @@ async fn run_async_probe(p: &Probe) -> ProbeOutcome {
         }
         ProbeKind::Dns { host } => run_dns(host).await,
         #[cfg(feature = "http-client")]
-        ProbeKind::Http {
-            url,
-            expect,
-            headers,
-        } => run_http(url, expect, headers, p.timeout).await,
+        ProbeKind::Http { url, expect } => run_http(url, expect, &p.headers, p.timeout).await,
         #[cfg(all(feature = "ssh-client", unix))]
         ProbeKind::Ssh { dest, command } => run_ssh(dest, command).await,
         ProbeKind::Custom { run } => run_custom(run).await,

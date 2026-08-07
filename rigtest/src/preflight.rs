@@ -171,11 +171,6 @@ pub enum ProbeKind {
         url: Cow<'static, str>,
         /// Status codes that count as a passing probe.
         expect: ExpectStatus,
-        /// Request headers to send with the GET, in declaration order.
-        /// Added via [`Preflight::header`]. Values may be secrets (API
-        /// keys), so the manual [`Debug`][fmt::Debug] impl renders names
-        /// but redacts values.
-        headers: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     },
     /// An SSH connect-and-exec probe — passes when a session to `dest`
     /// is established and the remote `command` exits 0. Reuses the
@@ -249,25 +244,11 @@ impl fmt::Debug for ProbeKind {
                 .finish(),
             Self::Dns { host } => f.debug_struct("Dns").field("host", host).finish(),
             #[cfg(feature = "http-client")]
-            Self::Http {
-                url,
-                expect,
-                headers,
-            } => {
-                // Header values may be secrets (API keys). Render names so
-                // a misconfigured probe is diagnosable, but redact every
-                // value so no `{:?}` output — logs, panic messages —
-                // leaks a credential.
-                let redacted: Vec<(&str, &str)> = headers
-                    .iter()
-                    .map(|(name, _)| (name.as_ref(), "<redacted>"))
-                    .collect();
-                f.debug_struct("Http")
-                    .field("url", url)
-                    .field("expect", expect)
-                    .field("headers", &redacted)
-                    .finish()
-            }
+            Self::Http { url, expect } => f
+                .debug_struct("Http")
+                .field("url", url)
+                .field("expect", expect)
+                .finish(),
             #[cfg(all(feature = "ssh-client", unix))]
             Self::Ssh { dest, command } => f
                 .debug_struct("Ssh")
@@ -285,7 +266,6 @@ impl fmt::Debug for ProbeKind {
 /// Fields may be added in future releases. The `#[non_exhaustive]`
 /// attribute prevents external code from constructing this struct via
 /// struct-literal syntax — use [`Preflight`]'s builder methods.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct Probe {
     /// Display name, as it appears in the readiness output and in
@@ -304,6 +284,31 @@ pub struct Probe {
     ///   work the closure does, so any default would be wrong for some
     ///   legitimate use case; the closure owns its own discipline.
     pub timeout: Option<Duration>,
+    /// Request headers sent by an HTTP probe, in declaration order. Added
+    /// via `Preflight::header` (available with the `http-client` feature);
+    /// empty for every other probe kind. Values may be secrets (API keys),
+    /// so the manual [`Debug`][fmt::Debug] impl renders names but redacts
+    /// values.
+    pub headers: Vec<(Cow<'static, str>, Cow<'static, str>)>,
+}
+
+impl fmt::Debug for Probe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Header values may be secrets (API keys). Render names so a
+        // misconfigured probe stays diagnosable, but redact every value so
+        // no `{:?}` output — logs, panic messages — leaks a credential.
+        let redacted: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(name, _)| (name.as_ref(), "<redacted>"))
+            .collect();
+        f.debug_struct("Probe")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("timeout", &self.timeout)
+            .field("headers", &redacted)
+            .finish()
+    }
 }
 
 /// Builder for a list of [`Probe`]s declared by a `#[preflight]` function.
@@ -363,6 +368,7 @@ impl Preflight {
                 target: target.into(),
             },
             timeout: Some(DEFAULT_PROBE_TIMEOUT),
+            headers: Vec::new(),
         });
         self
     }
@@ -391,6 +397,7 @@ impl Preflight {
                 expected: None,
             },
             timeout: None,
+            headers: Vec::new(),
         });
         self
     }
@@ -418,6 +425,7 @@ impl Preflight {
             name: name.into(),
             kind: ProbeKind::Dns { host: host.into() },
             timeout: Some(DEFAULT_PROBE_TIMEOUT),
+            headers: Vec::new(),
         });
         self
     }
@@ -454,9 +462,9 @@ impl Preflight {
             kind: ProbeKind::Http {
                 url: url.into(),
                 expect: ExpectStatus::Range(DEFAULT_HTTP_OK_STATUS),
-                headers: Vec::new(),
             },
             timeout: Some(DEFAULT_PROBE_TIMEOUT),
+            headers: Vec::new(),
         });
         self
     }
@@ -500,6 +508,7 @@ impl Preflight {
                 command: Cow::Borrowed(DEFAULT_SSH_COMMAND),
             },
             timeout: Some(DEFAULT_PROBE_TIMEOUT),
+            headers: Vec::new(),
         });
         self
     }
@@ -540,6 +549,7 @@ impl Preflight {
             name: name.into(),
             kind: ProbeKind::Custom { run },
             timeout: None,
+            headers: Vec::new(),
         });
         self
     }
@@ -647,8 +657,10 @@ impl Preflight {
         value: impl Into<Cow<'static, str>>,
     ) -> Self {
         if let Some(last) = self.probes.last_mut() {
-            if let ProbeKind::Http { headers, .. } = &mut last.kind {
-                headers.push((name.into(), value.into()));
+            // Headers only apply to HTTP probes; stay a no-op otherwise so a
+            // stray `.header()` after a non-http probe can't silently attach.
+            if matches!(last.kind, ProbeKind::Http { .. }) {
+                last.headers.push((name.into(), value.into()));
             }
         }
         self
@@ -892,16 +904,13 @@ mod tests {
             .http("api", "https://example.com/health")
             .header("X-Api-Key", "supersecret")
             .header("Accept", "application/json");
-        match &p.probes()[0].kind {
-            ProbeKind::Http { headers, .. } => {
-                assert_eq!(headers.len(), 2);
-                assert_eq!(headers[0].0, "X-Api-Key");
-                assert_eq!(headers[0].1, "supersecret");
-                assert_eq!(headers[1].0, "Accept");
-                assert_eq!(headers[1].1, "application/json");
-            }
-            _ => panic!("expected http probe"),
-        }
+        let probe = &p.probes()[0];
+        assert!(matches!(probe.kind, ProbeKind::Http { .. }));
+        assert_eq!(probe.headers.len(), 2);
+        assert_eq!(probe.headers[0].0, "X-Api-Key");
+        assert_eq!(probe.headers[0].1, "supersecret");
+        assert_eq!(probe.headers[1].0, "Accept");
+        assert_eq!(probe.headers[1].1, "application/json");
     }
 
     #[cfg(feature = "http-client")]
@@ -911,6 +920,10 @@ mod tests {
             .tcp("api", "127.0.0.1:1")
             .header("X-Api-Key", "supersecret");
         assert!(matches!(p.probes()[0].kind, ProbeKind::Tcp { .. }));
+        assert!(
+            p.probes()[0].headers.is_empty(),
+            "header on a non-http probe must be dropped, not stored"
+        );
     }
 
     #[cfg(feature = "http-client")]
@@ -919,7 +932,7 @@ mod tests {
         let p = Preflight::new()
             .http("api", "https://example.com/health")
             .header("X-Api-Key", "supersecret");
-        let rendered = format!("{:?}", p.probes()[0].kind);
+        let rendered = format!("{:?}", p.probes()[0]);
         assert!(
             rendered.contains("X-Api-Key"),
             "header name should be visible: {rendered}"
