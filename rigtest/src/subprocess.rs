@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 
 use crate::protocol::{self, SubprocessOutcome};
+use crate::state::StateHandoff;
 
 /// Runs one test case as a subprocess and returns its outcome.
 ///
@@ -21,8 +22,7 @@ pub(crate) trait SubprocessRunner: Send + Sync + 'static {
     fn run(
         &self,
         test_name: &str,
-        state_var: &str,
-        state_json: &str,
+        state: &StateHandoff,
         timeout: Option<Duration>,
     ) -> impl std::future::Future<Output = anyhow::Result<SubprocessOutcome>> + Send;
 }
@@ -43,16 +43,15 @@ impl SubprocessRunner for OsSubprocessRunner {
     async fn run(
         &self,
         test_name: &str,
-        state_var: &str,
-        state_json: &str,
+        state: &StateHandoff,
         timeout: Option<Duration>,
     ) -> anyhow::Result<SubprocessOutcome> {
         let mut cmd = tokio::process::Command::new(&self.exe);
         cmd.arg("--run-single")
             .arg(test_name)
             .arg("--state-env-var")
-            .arg(state_var)
-            .env(state_var, state_json);
+            .arg(state.var())
+            .env(state.var(), state.json());
 
         if self.no_capture {
             spawn_no_capture(cmd, timeout).await

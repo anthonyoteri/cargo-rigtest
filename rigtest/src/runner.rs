@@ -4,27 +4,15 @@ use futures::FutureExt as _;
 use crate::context::TestContext;
 use crate::protocol;
 use crate::registry::{RIG_GLOBAL_SETUP, RIG_TEST_CASES};
+use crate::state::StateHandoff;
 
 /// Deserialize global state, run exactly one named test, and exit.
 ///
 /// Called in subprocess mode when `--run-single` is present.
 pub(crate) async fn run_single(test_name: &str, state_var: Option<&str>) -> anyhow::Result<()> {
-    let global_data: Box<dyn std::any::Any + Send + Sync> = if let Some(var) = state_var {
-        let json = std::env::var(var).unwrap_or_default();
-        // Remove the env var so it is not visible to the test function or any
-        // child processes it might spawn.
-        //
-        // SAFETY: single-threaded at this point — the Tokio runtime has not
-        // yet spawned any threads, and no other threads read this variable.
-        unsafe { std::env::remove_var(var) };
-
-        if let Some(entry) = RIG_GLOBAL_SETUP.first() {
-            (entry.deserialize_fn)(&json)
-        } else {
-            Box::new(())
-        }
-    } else {
-        Box::new(())
+    let global_data: Box<dyn std::any::Any + Send + Sync> = match state_var {
+        Some(var) => StateHandoff::load(var, RIG_GLOBAL_SETUP.first()),
+        None => Box::new(()),
     };
 
     let tc = RIG_TEST_CASES
