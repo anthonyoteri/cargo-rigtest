@@ -14,6 +14,7 @@ use crate::registry::{
     RIG_DEFAULT_TIMEOUT, RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_PREFLIGHT, RIG_TEST_CASES,
 };
 use crate::reporter::{MultiReporter, Reporter, TestEventReporter, TestRef};
+use crate::schedule::{Phase, PlannedCase, Schedule};
 use crate::scheduler::RuntimeArgs;
 use crate::subprocess::{OsSubprocessRunner, SubprocessRunner};
 
@@ -268,50 +269,30 @@ enum Outcome {
     Failed,
 }
 
-/// Compute the timeout that actually applies to `tc`.
+/// Run a planned test with retries, returning the final outcome and updating
+/// the reporter.
 ///
-/// Precedence: a per-case explicit `timeout` wins over the suite-wide
-/// `default_timeout`; `no_timeout` forces no timeout even when a default is
-/// set. With neither in play, the suite default (if any) applies.
-fn effective_timeout(
-    tc: &crate::registry::TestCase,
-    suite_default: Option<Duration>,
-) -> Option<Duration> {
-    if tc.no_timeout {
-        None
-    } else {
-        tc.timeout.or(suite_default)
-    }
-}
-
-/// Run a test with retries, returning the final outcome and updating the
-/// reporter.
-///
-/// `retries_override` replaces the test's declared retry count when set
-/// (the CLI `--retries N` flag); the test's `retry_on_error` matcher (if
-/// any) is left in force regardless. When a matcher is in force, panics,
-/// timeouts, and subprocess crashes are not retried — only failures whose
-/// typed `Err(_)` matched the pattern are retried.
+/// The timeout and retry budget are already resolved on the [`PlannedCase`]
+/// (see [`Schedule::plan`]); the test's `retry_on_error` matcher (if any) is
+/// left in force regardless. When a matcher is in force, panics, timeouts, and
+/// subprocess crashes are not retried — only failures whose typed `Err(_)`
+/// matched the pattern are retried.
 async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     runner: &R,
     reporter: &P,
-    tc: &crate::registry::TestCase,
+    pc: &PlannedCase,
     state_var: &str,
     state_json: &str,
-    retries_override: Option<usize>,
-    suite_default_timeout: Option<Duration>,
 ) -> (Outcome, Duration) {
+    let tc = pc.case;
     let tref = test_ref(tc);
     reporter.test_started(tref);
     let test_start = Instant::now();
-    let timeout = effective_timeout(tc, suite_default_timeout);
-    let effective_retries =
-        retries_override.map_or(tc.retries, |n| u32::try_from(n).unwrap_or(u32::MAX));
-    let max_attempts = effective_retries.saturating_add(1);
+    let max_attempts = pc.max_attempts;
     let mut attempt_start = Instant::now();
 
     for attempt in 1..=max_attempts {
-        let raw = runner.run(tc.name, state_var, state_json, timeout).await;
+        let raw = runner.run(tc.name, state_var, state_json, pc.timeout).await;
 
         let is_last = attempt == max_attempts;
         let duration = test_start.elapsed();
@@ -357,43 +338,82 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     unreachable!()
 }
 
-#[allow(clippy::too_many_arguments)] // wiring function; each value is a
-                                     // distinct piece of state that can't be meaningfully bundled.
-async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
+/// Execute a [`Schedule`]: run the parallel phase concurrently, then the
+/// exclusive phase sequentially. Returns `(passed, skipped)`; the caller
+/// derives `failed = total - passed - skipped`.
+async fn execute<R: SubprocessRunner, P: TestEventReporter>(
+    schedule: Schedule,
     runner: Arc<R>,
     reporter: Arc<P>,
     state_var: String,
     state_json: String,
-    semaphore: Arc<Semaphore>,
-    parallel_cases: Vec<&'static crate::registry::TestCase>,
-    serial_cases: Vec<&'static crate::registry::TestCase>,
-    retries_override: Option<usize>,
-    suite_default_timeout: Option<Duration>,
 ) -> (usize, usize) {
     let mut passed = 0usize;
     let mut skipped = 0usize;
-    let mut join_set: JoinSet<Outcome> = JoinSet::new();
 
-    // One Semaphore(1) per distinct serial group present among the parallel
-    // cases. Same-group tasks acquire it so they never overlap; different
-    // groups hold different locks and stay concurrent.
-    let mut group_locks: std::collections::HashMap<&'static str, Arc<Semaphore>> =
-        std::collections::HashMap::new();
-    for tc in &parallel_cases {
-        if let Some(g) = tc.serial_group {
-            group_locks
-                .entry(g)
-                .or_insert_with(|| Arc::new(Semaphore::new(1)));
+    for phase in schedule.phases {
+        match phase {
+            Phase::Parallel { cases, cap, groups } => {
+                let (p, s) = run_parallel_phase(
+                    &runner,
+                    &reporter,
+                    &state_var,
+                    &state_json,
+                    cases,
+                    cap,
+                    &groups,
+                )
+                .await;
+                passed += p;
+                skipped += s;
+            }
+            Phase::Exclusive { cases } => {
+                for pc in cases {
+                    let (outcome, _) =
+                        run_test(&*runner, &*reporter, &pc, &state_var, &state_json).await;
+                    tally(outcome, &mut passed, &mut skipped);
+                }
+            }
         }
     }
 
-    for tc in parallel_cases {
-        let runner = Arc::clone(&runner);
-        let reporter = Arc::clone(&reporter);
+    (passed, skipped)
+}
+
+fn tally(outcome: Outcome, passed: &mut usize, skipped: &mut usize) {
+    match outcome {
+        Outcome::Passed => *passed += 1,
+        Outcome::Skipped => *skipped += 1,
+        Outcome::Failed => {}
+    }
+}
+
+/// Run the parallel phase on a `JoinSet`: each task acquires the global cap
+/// permit, then its serial-group permit (if any), so same-group cases never
+/// overlap while different groups stay concurrent.
+async fn run_parallel_phase<R: SubprocessRunner, P: TestEventReporter>(
+    runner: &Arc<R>,
+    reporter: &Arc<P>,
+    state_var: &str,
+    state_json: &str,
+    cases: Vec<PlannedCase>,
+    cap: usize,
+    groups: &[&'static str],
+) -> (usize, usize) {
+    let semaphore = Arc::new(Semaphore::new(cap));
+    let group_locks: std::collections::HashMap<&'static str, Arc<Semaphore>> = groups
+        .iter()
+        .map(|g| (*g, Arc::new(Semaphore::new(1))))
+        .collect();
+
+    let mut join_set: JoinSet<Outcome> = JoinSet::new();
+    for pc in cases {
+        let runner = Arc::clone(runner);
+        let reporter = Arc::clone(reporter);
         let semaphore = Arc::clone(&semaphore);
-        let group_lock = tc.serial_group.map(|g| Arc::clone(&group_locks[g]));
-        let state_var = state_var.clone();
-        let state_json = state_json.clone();
+        let group_lock = pc.serial_group.map(|g| Arc::clone(&group_locks[g]));
+        let state_var = state_var.to_owned();
+        let state_json = state_json.to_owned();
 
         join_set.spawn(async move {
             let _permit = semaphore
@@ -408,44 +428,17 @@ async fn dispatch_cases<R: SubprocessRunner, P: TestEventReporter>(
                 ),
                 None => None,
             };
-            let (outcome, _) = run_test(
-                &*runner,
-                &*reporter,
-                tc,
-                &state_var,
-                &state_json,
-                retries_override,
-                suite_default_timeout,
-            )
-            .await;
+            let (outcome, _) = run_test(&*runner, &*reporter, &pc, &state_var, &state_json).await;
             outcome
         });
     }
 
+    let mut passed = 0usize;
+    let mut skipped = 0usize;
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok(Outcome::Passed) => passed += 1,
-            Ok(Outcome::Skipped) => skipped += 1,
-            Ok(Outcome::Failed) => {}
+            Ok(outcome) => tally(outcome, &mut passed, &mut skipped),
             Err(e) => eprintln!("cargo-rigtest: task join error: {e}"),
-        }
-    }
-
-    for tc in serial_cases {
-        let (outcome, _) = run_test(
-            &*runner,
-            &*reporter,
-            tc,
-            &state_var,
-            &state_json,
-            retries_override,
-            suite_default_timeout,
-        )
-        .await;
-        match outcome {
-            Outcome::Passed => passed += 1,
-            Outcome::Skipped => skipped += 1,
-            Outcome::Failed => {}
         }
     }
 
@@ -546,12 +539,11 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     cases.shuffle(&mut rng);
 
     let total = cases.len();
-    let jobs = if args.no_capture {
+    let cap = if args.no_capture {
         1
     } else {
         args.jobs.unwrap_or_else(default_jobs)
     };
-    let semaphore = Arc::new(Semaphore::new(jobs));
 
     let exe =
         std::env::current_exe().map_err(|e| anyhow!("failed to find current executable: {e}"))?;
@@ -560,22 +552,16 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
 
     let suite_start = Instant::now();
 
-    let (serial_cases, parallel_cases): (Vec<_>, Vec<_>) =
-        cases.into_iter().partition(|tc| tc.serial);
-
     let retries_override = args.retries;
     let suite_default_timeout = RIG_DEFAULT_TIMEOUT.first().map(|e| e.timeout);
+    let schedule = Schedule::plan(cases, cap, retries_override, suite_default_timeout);
 
-    let (passed, skipped) = dispatch_cases(
+    let (passed, skipped) = execute(
+        schedule,
         runner,
         Arc::clone(&reporter),
         state_var,
         state_json,
-        semaphore,
-        parallel_cases,
-        serial_cases,
-        retries_override,
-        suite_default_timeout,
     )
     .await;
 
@@ -632,34 +618,22 @@ mod tests {
         tc
     }
 
-    // ── effective_timeout precedence ─────────────────────────────────────
+    // Effective-timeout precedence now lives in the pure plan; see the
+    // `schedule::tests` timeout_* tests.
 
-    #[test]
-    fn effective_timeout_uses_suite_default_when_no_per_case() {
-        let tc = make_case("t");
-        let default = Some(Duration::from_secs(5));
-        assert_eq!(effective_timeout(&tc, default), default);
-    }
-
-    #[test]
-    fn effective_timeout_per_case_wins_over_default() {
-        let mut tc = make_case("t");
-        tc.timeout = Some(Duration::from_secs(1));
-        let out = effective_timeout(&tc, Some(Duration::from_secs(5)));
-        assert_eq!(out, Some(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn effective_timeout_no_timeout_forces_none() {
-        let mut tc = make_case("t");
-        tc.no_timeout = true;
-        assert_eq!(effective_timeout(&tc, Some(Duration::from_secs(5))), None);
-    }
-
-    #[test]
-    fn effective_timeout_none_when_nothing_set() {
-        let tc = make_case("t");
-        assert_eq!(effective_timeout(&tc, None), None);
+    /// Wrap an owned test case in a `PlannedCase`, resolving its retry budget
+    /// the same way `Schedule::plan` does. These retry tests never set a
+    /// per-case timeout, so `timeout` resolves to `None`. Leaks the case for
+    /// the `'static` bound the executor requires — acceptable in tests.
+    fn plan_case(tc: TestCase, retries_override: Option<usize>) -> PlannedCase {
+        let effective =
+            retries_override.map_or(tc.retries, |n| u32::try_from(n).unwrap_or(u32::MAX));
+        PlannedCase {
+            timeout: tc.timeout,
+            max_attempts: effective.saturating_add(1),
+            serial_group: tc.serial_group,
+            case: Box::leak(Box::new(tc)),
+        }
     }
 
     #[test]
@@ -848,7 +822,7 @@ mod tests {
         let tc = case_with_retries("flaky", 1);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -860,7 +834,7 @@ mod tests {
         let tc = case_with_retries("skipper", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Skipped));
         assert_eq!(runner.call_count(), 1);
@@ -876,7 +850,7 @@ mod tests {
         let tc = case_with_retries("always_fails", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 3); // initial + 2 retries
@@ -890,7 +864,7 @@ mod tests {
         let tc = case_with_retry_on_error("strict_matcher", 5);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(
@@ -909,7 +883,7 @@ mod tests {
         let tc = case_with_retry_on_error("flaky_with_matcher", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -921,7 +895,7 @@ mod tests {
         let tc = case_with_retry_on_error("times_out_matcher", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(
@@ -940,7 +914,7 @@ mod tests {
         let tc = case_with_retries("times_out_then_passes", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -957,7 +931,7 @@ mod tests {
         let tc = case_with_retries("override_total", 0);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(5), None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(5)), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 3);
@@ -970,7 +944,7 @@ mod tests {
         let tc = case_with_retries("strict_run", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(0), None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(0)), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 1);
@@ -985,7 +959,7 @@ mod tests {
         // Even with the operator bumping to 10 retries, a non-matching
         // error must still fail-fast — the override replaces the count
         // but not the matcher.
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", Some(10), None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(10)), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 1);
@@ -1002,7 +976,7 @@ mod tests {
         let tc = case_with_retries("flaky", 1);
         let reporter = RecordingReporter::new();
 
-        let (outcome, _) = run_test(&runner, &reporter, &tc, "X", "{}", None, None).await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
 
         assert!(matches!(outcome, Outcome::Passed));
         let events = reporter.events();
@@ -1064,81 +1038,24 @@ mod tests {
         outcomes.insert("e", SubprocessOutcome::Passed);
         let runner = Arc::new(ByNameRunner { outcomes });
         let reporter = Arc::new(NullReporter);
-        let semaphore = Arc::new(Semaphore::new(4));
 
         let cases: Vec<&'static TestCase> = ["a", "b", "c", "d", "e"]
             .into_iter()
             .map(|n| leaked_case(n, false))
             .collect();
+        let schedule = Schedule::plan(cases, 4, None, None);
 
-        let (passed, skipped) = dispatch_cases(
-            runner,
-            reporter,
-            "X".into(),
-            "{}".into(),
-            semaphore,
-            cases,
-            Vec::new(),
-            None,
-            None,
-        )
-        .await;
+        let (passed, skipped) = execute(schedule, runner, reporter, "X".into(), "{}".into()).await;
 
         assert_eq!(passed, 3);
         assert_eq!(skipped, 1);
         // failed = total - passed - skipped = 5 - 3 - 1 = 1
     }
 
-    #[tokio::test]
-    async fn dispatch_runs_serial_cases_after_all_parallel() {
-        let runner = Arc::new(ByNameRunner {
-            outcomes: HashMap::new(),
-        });
-        let reporter = Arc::new(RecordingReporter::new());
-        let semaphore = Arc::new(Semaphore::new(2));
-
-        let parallel = vec![
-            leaked_case("p1", false),
-            leaked_case("p2", false),
-            leaked_case("p3", false),
-        ];
-        let serial = vec![leaked_case("s1", true), leaked_case("s2", true)];
-
-        let _ = dispatch_cases(
-            Arc::clone(&runner),
-            Arc::clone(&reporter),
-            "X".into(),
-            "{}".into(),
-            semaphore,
-            parallel,
-            serial,
-            None,
-            None,
-        )
-        .await;
-
-        let events = reporter.events();
-        let started: Vec<&str> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::Started(n) => Some(n.as_str()),
-                _ => None,
-            })
-            .collect();
-        // Every "p*" must come before every "s*".
-        let last_parallel_idx = started
-            .iter()
-            .rposition(|n| n.starts_with('p'))
-            .expect("at least one parallel started");
-        let first_serial_idx = started
-            .iter()
-            .position(|n| n.starts_with('s'))
-            .expect("at least one serial started");
-        assert!(
-            last_parallel_idx < first_serial_idx,
-            "expected all parallel cases to start before any serial case, got started order: {started:?}"
-        );
-    }
+    // Serial-runs-after-parallel is now a data invariant of the plan (the
+    // `Exclusive` phase always follows `Parallel`); see
+    // `schedule::tests::exclusive_phase_follows_parallel_phase`. `execute`
+    // just iterates the phases in order, so no live-tokio test is needed.
 
     /// Runner that records the maximum number of concurrent in-flight calls
     /// observed at any point.
@@ -1178,7 +1095,6 @@ mod tests {
     async fn dispatch_respects_semaphore_cap() {
         let runner = Arc::new(ConcurrencyRunner::new());
         let reporter = Arc::new(NullReporter);
-        let semaphore = Arc::new(Semaphore::new(2));
 
         let cases: Vec<&'static TestCase> = (0..10)
             .map(|i| {
@@ -1186,17 +1102,14 @@ mod tests {
                 leaked_case(name, false)
             })
             .collect();
+        let schedule = Schedule::plan(cases, 2, None, None);
 
-        let _ = dispatch_cases(
+        let _ = execute(
+            schedule,
             Arc::clone(&runner),
             reporter,
             "X".into(),
             "{}".into(),
-            semaphore,
-            cases,
-            Vec::new(),
-            None,
-            None,
         )
         .await;
 
@@ -1212,18 +1125,18 @@ mod tests {
     }
 
     /// Runner keyed by a test-name → group map. Tracks the max concurrency
-    /// observed *within* each group and the max concurrency observed overall.
+    /// observed *within* each group so a same-group overlap is detectable.
     struct GroupConcurrencyRunner {
         groups: HashMap<&'static str, &'static str>,
         active: Mutex<HashMap<&'static str, usize>>,
         per_group_max: Mutex<HashMap<&'static str, usize>>,
-        overall_active: AtomicUsize,
         overall_max: AtomicUsize,
+        overall_active: AtomicUsize,
         /// Optional rendezvous: when set, every task blocks here after
-        /// recording its in-flight count and before releasing, so a
-        /// concurrency assertion is deterministic instead of timing-based.
-        /// Left `None` for the mutual-exclusion test, where a barrier would
-        /// deadlock (same-group tasks can never be in flight together).
+        /// recording its in-flight count, so a cross-group concurrency
+        /// assertion is deterministic rather than timing-based. Left `None`
+        /// for the mutual-exclusion test, where a barrier would deadlock
+        /// (same-group tasks can never be in flight together).
         rendezvous: Option<Arc<tokio::sync::Barrier>>,
     }
 
@@ -1233,8 +1146,8 @@ mod tests {
                 groups,
                 active: Mutex::new(HashMap::new()),
                 per_group_max: Mutex::new(HashMap::new()),
-                overall_active: AtomicUsize::new(0),
                 overall_max: AtomicUsize::new(0),
+                overall_active: AtomicUsize::new(0),
                 rendezvous: None,
             }
         }
@@ -1266,8 +1179,9 @@ mod tests {
             }
             let overall = self.overall_active.fetch_add(1, Ordering::SeqCst) + 1;
             self.overall_max.fetch_max(overall, Ordering::SeqCst);
-            // Every task has now recorded its in-flight count; block until all
-            // parties arrive so the overlap is provable, not timing-dependent.
+            // With a rendezvous, every task must arrive before any proceeds, so
+            // cross-group overlap is provable; otherwise sleep so a same-group
+            // sibling has a real chance to overlap if the lock were broken.
             if let Some(barrier) = &self.rendezvous {
                 barrier.wait().await;
             } else {
@@ -1284,24 +1198,20 @@ mod tests {
         let groups: HashMap<&str, &str> = [("db1", "db"), ("db2", "db")].into_iter().collect();
         let runner = Arc::new(GroupConcurrencyRunner::new(groups));
         let reporter = Arc::new(NullReporter);
-        // Jobs high enough that only the group lock can serialize them.
-        let semaphore = Arc::new(Semaphore::new(4));
 
+        // Cap high enough that only the group lock can serialize them.
         let cases = vec![
             leaked_group_case("db1", "db"),
             leaked_group_case("db2", "db"),
         ];
+        let schedule = Schedule::plan(cases, 4, None, None);
 
-        let _ = dispatch_cases(
+        let _ = execute(
+            schedule,
             Arc::clone(&runner),
             reporter,
             "X".into(),
             "{}".into(),
-            semaphore,
-            cases,
-            Vec::new(),
-            None,
-            None,
         )
         .await;
 
@@ -1311,26 +1221,27 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn dispatch_different_groups_run_concurrently() {
+        // The plan lists distinct group names, but the runtime guarantee —
+        // distinct groups map to distinct locks and can therefore overlap —
+        // lives in `run_parallel_phase`'s lock-map construction, which the pure
+        // plan tests do not exercise. This guards that layer: a regression that
+        // shared one lock across groups (or looked up the wrong one) would
+        // over-serialize and fail the `overall_max >= 2` assertion.
         let groups: HashMap<&str, &str> = [("a1", "a"), ("b1", "b")].into_iter().collect();
-        // Two parties rendezvous: both cases must be simultaneously in flight
-        // to pass the barrier, so overall_max == 2 is guaranteed rather than
-        // depending on scheduler timing (which flakes on a loaded runner).
+        // Two parties rendezvous: both must be in flight to pass the barrier,
+        // so `overall_max == 2` is deterministic, not timing-dependent.
         let runner = Arc::new(GroupConcurrencyRunner::with_rendezvous(groups, 2));
         let reporter = Arc::new(NullReporter);
-        let semaphore = Arc::new(Semaphore::new(4));
 
         let cases = vec![leaked_group_case("a1", "a"), leaked_group_case("b1", "b")];
+        let schedule = Schedule::plan(cases, 4, None, None);
 
-        let _ = dispatch_cases(
+        let _ = execute(
+            schedule,
             Arc::clone(&runner),
             reporter,
             "X".into(),
             "{}".into(),
-            semaphore,
-            cases,
-            Vec::new(),
-            None,
-            None,
         )
         .await;
 
