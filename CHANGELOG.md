@@ -5,6 +5,21 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.7.0](https://github.com/anthonyoteri/cargo-rigtest/compare/f888c99f6e23f3b2ecaf7845b1a82ed662d3d9a0..v0.7.0) - 2026-08-10
+#### Features
+- (**macros**) function-scoped #[fixture] injected by parameter name (#111) - ([18a6f5f](https://github.com/anthonyoteri/cargo-rigtest/commit/18a6f5f30fefaeaa464dfac12f2ae16c454358c0)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**macros**) cartesian #[values] parametrization for table-driven cases (#109) - ([a5df8b8](https://github.com/anthonyoteri/cargo-rigtest/commit/a5df8b84655d8f4ba81a5a47e87c4b101c23c7ae)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) suite-wide default test timeout with per-case override (#108) - ([62cc69a](https://github.com/anthonyoteri/cargo-rigtest/commit/62cc69acc829e7b3cc0e9baaf66008e19fd5c2bd)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) support request headers on the preflight http probe (#107) - ([d253ad5](https://github.com/anthonyoteri/cargo-rigtest/commit/d253ad56378468fa20406f031240120e06194d9c)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) named serial groups for scoped mutual exclusion (#103) - ([383c186](https://github.com/anthonyoteri/cargo-rigtest/commit/383c1863faa92400a7ea92ff7424c45af1a6c4b0)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Refactoring
+- (**macros**) split #[testcase] into parse -> plan -> generate (#117) - ([fbf82d3](https://github.com/anthonyoteri/cargo-rigtest/commit/fbf82d3692084fe0d05732a32b3b69743d98be94)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**preflight**) store http probe headers on Probe, not the variant (#113) - ([3b03768](https://github.com/anthonyoteri/cargo-rigtest/commit/3b03768effb8be977f3fbedd352ac0170c5ace6b)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) give the global-state handoff a StateHandoff module (#121) - ([82f9e02](https://github.com/anthonyoteri/cargo-rigtest/commit/82f9e02ba2a31d6b4d6050f987039f213285f2e9)) - [@anthonyoteri](https://github.com/anthonyoteri)
+- (**rigtest**) scheduling policy as a pure Schedule plan (#119) - ([a704e22](https://github.com/anthonyoteri/cargo-rigtest/commit/a704e22e8d58a57f24e4158a466e132524a48f41)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.6.0](https://github.com/anthonyoteri/cargo-rigtest/compare/405eece19493e2c0749c0533ad35e076e00a677a..v0.6.0) - 2026-07-24
 #### Features
 - (**cli**) --retries flag overrides every test's retry count for one run - ([21ca9c4](https://github.com/anthonyoteri/cargo-rigtest/commit/21ca9c462359e09c2a5bd465d7fa1997ad6a290b)) - [@anthonyoteri](https://github.com/anthonyoteri)
