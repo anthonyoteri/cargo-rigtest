@@ -292,6 +292,7 @@ pub mod registry;
 pub(crate) mod reporter;
 pub(crate) mod retry;
 pub(crate) mod runner;
+pub(crate) mod schedule;
 pub(crate) mod scheduler;
 pub(crate) mod subprocess;
 
