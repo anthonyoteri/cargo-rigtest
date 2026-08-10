@@ -16,6 +16,7 @@ use crate::registry::{
 use crate::reporter::{MultiReporter, Reporter, TestEventReporter, TestRef};
 use crate::schedule::{Phase, PlannedCase, Schedule};
 use crate::scheduler::RuntimeArgs;
+use crate::state::StateHandoff;
 use crate::subprocess::{OsSubprocessRunner, SubprocessRunner};
 
 /// Sentinel error returned by [`run`] when the preflight phase aborts the
@@ -281,8 +282,7 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     runner: &R,
     reporter: &P,
     pc: &PlannedCase,
-    state_var: &str,
-    state_json: &str,
+    state: &StateHandoff,
 ) -> (Outcome, Duration) {
     let tc = pc.case;
     let tref = test_ref(tc);
@@ -292,7 +292,7 @@ async fn run_test<R: SubprocessRunner, P: TestEventReporter>(
     let mut attempt_start = Instant::now();
 
     for attempt in 1..=max_attempts {
-        let raw = runner.run(tc.name, state_var, state_json, pc.timeout).await;
+        let raw = runner.run(tc.name, state, pc.timeout).await;
 
         let is_last = attempt == max_attempts;
         let duration = test_start.elapsed();
@@ -345,8 +345,7 @@ async fn execute<R: SubprocessRunner, P: TestEventReporter>(
     schedule: Schedule,
     runner: Arc<R>,
     reporter: Arc<P>,
-    state_var: String,
-    state_json: String,
+    state: Arc<StateHandoff>,
 ) -> (usize, usize) {
     let mut passed = 0usize;
     let mut skipped = 0usize;
@@ -354,23 +353,14 @@ async fn execute<R: SubprocessRunner, P: TestEventReporter>(
     for phase in schedule.phases {
         match phase {
             Phase::Parallel { cases, cap, groups } => {
-                let (p, s) = run_parallel_phase(
-                    &runner,
-                    &reporter,
-                    &state_var,
-                    &state_json,
-                    cases,
-                    cap,
-                    &groups,
-                )
-                .await;
+                let (p, s) =
+                    run_parallel_phase(&runner, &reporter, &state, cases, cap, &groups).await;
                 passed += p;
                 skipped += s;
             }
             Phase::Exclusive { cases } => {
                 for pc in cases {
-                    let (outcome, _) =
-                        run_test(&*runner, &*reporter, &pc, &state_var, &state_json).await;
+                    let (outcome, _) = run_test(&*runner, &*reporter, &pc, &state).await;
                     tally(outcome, &mut passed, &mut skipped);
                 }
             }
@@ -394,8 +384,7 @@ fn tally(outcome: Outcome, passed: &mut usize, skipped: &mut usize) {
 async fn run_parallel_phase<R: SubprocessRunner, P: TestEventReporter>(
     runner: &Arc<R>,
     reporter: &Arc<P>,
-    state_var: &str,
-    state_json: &str,
+    state: &Arc<StateHandoff>,
     cases: Vec<PlannedCase>,
     cap: usize,
     groups: &[&'static str],
@@ -412,8 +401,7 @@ async fn run_parallel_phase<R: SubprocessRunner, P: TestEventReporter>(
         let reporter = Arc::clone(reporter);
         let semaphore = Arc::clone(&semaphore);
         let group_lock = pc.serial_group.map(|g| Arc::clone(&group_locks[g]));
-        let state_var = state_var.to_owned();
-        let state_json = state_json.to_owned();
+        let state = Arc::clone(state);
 
         join_set.spawn(async move {
             let _permit = semaphore
@@ -428,7 +416,7 @@ async fn run_parallel_phase<R: SubprocessRunner, P: TestEventReporter>(
                 ),
                 None => None,
             };
-            let (outcome, _) = run_test(&*runner, &*reporter, &pc, &state_var, &state_json).await;
+            let (outcome, _) = run_test(&*runner, &*reporter, &pc, &state).await;
             outcome
         });
     }
@@ -520,12 +508,11 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
         Box::new(())
     };
 
-    let state_var = format!("RIG_STATE_{:016x}", rng.random::<u64>());
-    let state_json: String = if let Some(entry) = global_setup {
-        (entry.serialize_fn)(&*global_data)
-    } else {
-        String::new()
-    };
+    let state = Arc::new(StateHandoff::capture(
+        global_setup,
+        &*global_data,
+        rng.random::<u64>(),
+    ));
 
     let cases_refs: Vec<&'static crate::registry::TestCase> = RIG_TEST_CASES.iter().collect();
     let name_filtered = apply_filter(&cases_refs, args.filter.as_deref());
@@ -556,14 +543,7 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
     let suite_default_timeout = RIG_DEFAULT_TIMEOUT.first().map(|e| e.timeout);
     let schedule = Schedule::plan(cases, cap, retries_override, suite_default_timeout);
 
-    let (passed, skipped) = execute(
-        schedule,
-        runner,
-        Arc::clone(&reporter),
-        state_var,
-        state_json,
-    )
-    .await;
+    let (passed, skipped) = execute(schedule, runner, Arc::clone(&reporter), state).await;
 
     let elapsed = suite_start.elapsed();
     let finish_result = reporter.finish(passed, skipped, total, elapsed);
@@ -592,6 +572,11 @@ mod tests {
     use crate::registry::{BoxFuture, TestCase};
     use crate::reporter::{Event, NullReporter, RecordingReporter};
     use std::sync::Mutex;
+
+    /// Empty state handoff for tests that don't exercise the state seam.
+    fn handoff() -> StateHandoff {
+        StateHandoff::capture(None, &(), 0)
+    }
 
     fn make_case(name: &'static str) -> TestCase {
         TestCase::new(
@@ -783,8 +768,7 @@ mod tests {
         async fn run(
             &self,
             _test_name: &str,
-            _state_var: &str,
-            _state_json: &str,
+            _state: &StateHandoff,
             _timeout: Option<Duration>,
         ) -> anyhow::Result<SubprocessOutcome> {
             *self.calls.lock().unwrap() += 1;
@@ -822,7 +806,7 @@ mod tests {
         let tc = case_with_retries("flaky", 1);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -834,7 +818,7 @@ mod tests {
         let tc = case_with_retries("skipper", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Skipped));
         assert_eq!(runner.call_count(), 1);
@@ -850,7 +834,7 @@ mod tests {
         let tc = case_with_retries("always_fails", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 3); // initial + 2 retries
@@ -864,7 +848,7 @@ mod tests {
         let tc = case_with_retry_on_error("strict_matcher", 5);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(
@@ -883,7 +867,7 @@ mod tests {
         let tc = case_with_retry_on_error("flaky_with_matcher", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -895,7 +879,7 @@ mod tests {
         let tc = case_with_retry_on_error("times_out_matcher", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(
@@ -914,7 +898,7 @@ mod tests {
         let tc = case_with_retries("times_out_then_passes", 2);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 2);
@@ -931,7 +915,7 @@ mod tests {
         let tc = case_with_retries("override_total", 0);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(5)), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(5)), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         assert_eq!(runner.call_count(), 3);
@@ -944,7 +928,7 @@ mod tests {
         let tc = case_with_retries("strict_run", 3);
         let reporter = NullReporter;
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(0)), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(0)), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 1);
@@ -959,7 +943,7 @@ mod tests {
         // Even with the operator bumping to 10 retries, a non-matching
         // error must still fail-fast — the override replaces the count
         // but not the matcher.
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(10)), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, Some(10)), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Failed));
         assert_eq!(runner.call_count(), 1);
@@ -976,7 +960,7 @@ mod tests {
         let tc = case_with_retries("flaky", 1);
         let reporter = RecordingReporter::new();
 
-        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), "X", "{}").await;
+        let (outcome, _) = run_test(&runner, &reporter, &plan_case(tc, None), &handoff()).await;
 
         assert!(matches!(outcome, Outcome::Passed));
         let events = reporter.events();
@@ -1016,8 +1000,7 @@ mod tests {
         async fn run(
             &self,
             test_name: &str,
-            _state_var: &str,
-            _state_json: &str,
+            _state: &StateHandoff,
             _timeout: Option<Duration>,
         ) -> anyhow::Result<SubprocessOutcome> {
             Ok(self
@@ -1045,7 +1028,7 @@ mod tests {
             .collect();
         let schedule = Schedule::plan(cases, 4, None, None);
 
-        let (passed, skipped) = execute(schedule, runner, reporter, "X".into(), "{}".into()).await;
+        let (passed, skipped) = execute(schedule, runner, reporter, Arc::new(handoff())).await;
 
         assert_eq!(passed, 3);
         assert_eq!(skipped, 1);
@@ -1077,8 +1060,7 @@ mod tests {
         async fn run(
             &self,
             _test_name: &str,
-            _state_var: &str,
-            _state_json: &str,
+            _state: &StateHandoff,
             _timeout: Option<Duration>,
         ) -> anyhow::Result<SubprocessOutcome> {
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1104,14 +1086,7 @@ mod tests {
             .collect();
         let schedule = Schedule::plan(cases, 2, None, None);
 
-        let _ = execute(
-            schedule,
-            Arc::clone(&runner),
-            reporter,
-            "X".into(),
-            "{}".into(),
-        )
-        .await;
+        let _ = execute(schedule, Arc::clone(&runner), reporter, Arc::new(handoff())).await;
 
         let max = runner.max_observed.load(Ordering::SeqCst);
         assert!(
@@ -1163,8 +1138,7 @@ mod tests {
         async fn run(
             &self,
             test_name: &str,
-            _state_var: &str,
-            _state_json: &str,
+            _state: &StateHandoff,
             _timeout: Option<Duration>,
         ) -> anyhow::Result<SubprocessOutcome> {
             let group = *self.groups.get(test_name).expect("known test name");
@@ -1206,14 +1180,7 @@ mod tests {
         ];
         let schedule = Schedule::plan(cases, 4, None, None);
 
-        let _ = execute(
-            schedule,
-            Arc::clone(&runner),
-            reporter,
-            "X".into(),
-            "{}".into(),
-        )
-        .await;
+        let _ = execute(schedule, Arc::clone(&runner), reporter, Arc::new(handoff())).await;
 
         let db_max = *runner.per_group_max.lock().unwrap().get("db").unwrap();
         assert_eq!(db_max, 1, "same-group cases must never overlap");
@@ -1236,14 +1203,7 @@ mod tests {
         let cases = vec![leaked_group_case("a1", "a"), leaked_group_case("b1", "b")];
         let schedule = Schedule::plan(cases, 4, None, None);
 
-        let _ = execute(
-            schedule,
-            Arc::clone(&runner),
-            reporter,
-            "X".into(),
-            "{}".into(),
-        )
-        .await;
+        let _ = execute(schedule, Arc::clone(&runner), reporter, Arc::new(handoff())).await;
 
         let overall = runner.overall_max.load(Ordering::SeqCst);
         assert!(

@@ -294,6 +294,7 @@ pub(crate) mod retry;
 pub(crate) mod runner;
 pub(crate) mod schedule;
 pub(crate) mod scheduler;
+pub(crate) mod state;
 pub(crate) mod subprocess;
 
 /// Internal helpers used by macro-generated code and the runtime. Not part
