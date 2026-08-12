@@ -509,6 +509,18 @@ via `ctx.client().await?`. See
 [`examples/http-client`](https://github.com/anthonyoteri/cargo-rigtest/tree/main/examples/http-client)
 for a working example including custom TLS configuration.
 
+The built-in client carries a default `connect_timeout` of 10 seconds and a
+total request `timeout` of 60 seconds, so a stuck endpoint fails fast instead
+of hanging the run. A configurator registered via
+`#[rigtest::main(http_client = …)]` runs after these defaults are applied, so
+calling `.timeout(…)` / `.connect_timeout(…)` there overrides them (to loosen a
+bound, set a larger duration).
+
+`#[global_setup]` and `#[global_teardown]` run before any `TestContext` exists,
+so they cannot use `ctx.client()`. Call `rigtest::http_client()?` there to build
+a client configured identically — same defaults, same configurator — rather
+than hand-rolling one.
+
 ---
 
 ## SSH client

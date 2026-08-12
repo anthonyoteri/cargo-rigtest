@@ -6,6 +6,66 @@ use futures::FutureExt;
 #[cfg(feature = "http-client")]
 use tokio::sync::OnceCell;
 
+/// Default connect timeout applied to every framework-built [`reqwest::Client`]
+/// before the `http_client` configurator runs.
+#[cfg(feature = "http-client")]
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Default total request timeout (connect + send + full response body) applied
+/// to every framework-built [`reqwest::Client`] before the `http_client`
+/// configurator runs.
+#[cfg(feature = "http-client")]
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Signature of an `http_client` configurator registered via
+/// `#[rigtest::main(http_client = ...)]`.
+#[cfg(feature = "http-client")]
+type HttpConfigFn =
+    fn(reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, crate::registry::BoxError>;
+
+/// Build a [`reqwest::Client`] with rigtest's default timeouts applied first,
+/// then hand the builder to `configurator` (whose calls override those defaults
+/// — builder-last-wins). The single place client construction happens, so
+/// [`TestContext::client`] and [`http_client`] can never diverge.
+#[cfg(feature = "http-client")]
+fn build_http_client(configurator: Option<HttpConfigFn>) -> Result<reqwest::Client, crate::Error> {
+    let builder = reqwest::ClientBuilder::new()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .timeout(DEFAULT_REQUEST_TIMEOUT);
+    let builder = match configurator {
+        Some(configure) => configure(builder)?,
+        None => builder,
+    };
+    Ok(builder.build()?)
+}
+
+/// Build an HTTP client configured exactly like the one [`TestContext::client`]
+/// hands to tests: rigtest's default `connect_timeout` (10s) and total request
+/// `timeout` (60s) applied first, then any configurator registered via
+/// `#[rigtest::main(http_client = ...)]` (which overrides those defaults).
+///
+/// Use this from `#[global_setup]` / `#[global_teardown]`, which run before any
+/// [`TestContext`] exists and therefore cannot call [`TestContext::client`], to
+/// avoid hand-rolling a second client with divergent (or absent) settings.
+///
+/// The defaults bound an otherwise-unbounded request — without them a stuck
+/// endpoint parks a request forever. To loosen a default, set a larger duration
+/// in your configurator; reqwest has no way to clear a timeout back to
+/// unbounded.
+///
+/// # Errors
+///
+/// Returns an error if the registered `http_client` configurator returns an
+/// error, or if `reqwest::ClientBuilder::build` fails.
+#[cfg(feature = "http-client")]
+pub fn http_client() -> Result<reqwest::Client, crate::Error> {
+    build_http_client(
+        crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR
+            .first()
+            .map(|entry| entry.configure_fn),
+    )
+}
+
 /// Shared context passed to every test function.
 ///
 /// Fields may be added in future releases. The `#[non_exhaustive]` attribute
@@ -50,9 +110,13 @@ impl TestContext {
     /// Returns a reference to the shared HTTP client, constructing it on first call.
     ///
     /// The client is built lazily: tests that skip or never make network calls
-    /// pay no TLS initialization cost. To customize the client (e.g. to accept
-    /// self-signed certificates), register a configurator via
-    /// `#[rigtest::main(http_client = your_fn)]` — see the
+    /// pay no TLS initialization cost. It carries rigtest's default
+    /// `connect_timeout` (10s) and total request `timeout` (60s) so a stuck
+    /// endpoint fails fast instead of hanging the run. To customize the client
+    /// (e.g. to accept self-signed certificates, or to override those
+    /// timeouts), register a configurator via
+    /// `#[rigtest::main(http_client = your_fn)]` — its builder calls override
+    /// the defaults. See the
     /// [`http-client` example](https://github.com/anthonyoteri/cargo-rigtest/tree/main/examples/http-client)
     /// for a complete example.
     ///
@@ -63,16 +127,7 @@ impl TestContext {
     #[cfg(feature = "http-client")]
     pub async fn client(&self) -> Result<&reqwest::Client, crate::Error> {
         self.client
-            .get_or_try_init(|| async {
-                let builder = reqwest::ClientBuilder::new();
-                let builder =
-                    if let Some(entry) = crate::registry::RIG_HTTP_CLIENT_CONFIGURATOR.first() {
-                        (entry.configure_fn)(builder)?
-                    } else {
-                        builder
-                    };
-                Ok(builder.build()?)
-            })
+            .get_or_try_init(|| async { http_client() })
             .await
     }
 
@@ -244,5 +299,63 @@ impl TestContext {
             Ok(Err(e)) => Err(format!("teardown failed: {e}").into()),
             Err(_) => Err(Box::from("teardown panicked")),
         }
+    }
+}
+
+#[cfg(all(test, feature = "http-client"))]
+mod tests {
+    use super::{build_http_client, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn builds_with_no_configurator() {
+        assert!(build_http_client(None).is_ok());
+    }
+
+    #[test]
+    fn defaults_are_bounded() {
+        // Guards against a future edit setting these to something absurd; the
+        // whole point is a non-infinite bound.
+        assert_eq!(DEFAULT_CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(DEFAULT_REQUEST_TIMEOUT, Duration::from_secs(60));
+    }
+
+    // A request to an endpoint that accepts the connection but never responds
+    // must fail via the client's own timeout, not hang. A configurator setting
+    // a short timeout overrides the 60s default (builder-last-wins), which lets
+    // this run fast while still exercising the real construction + timeout path.
+    #[tokio::test]
+    async fn configurator_timeout_overrides_and_fires() {
+        #[allow(clippy::unnecessary_wraps)] // Result required by the configurator fn pointer signature
+        fn short_timeout(
+            b: reqwest::ClientBuilder,
+        ) -> Result<reqwest::ClientBuilder, crate::registry::BoxError> {
+            Ok(b.timeout(Duration::from_millis(200)))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept and hold connections open forever without ever responding.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let client = build_http_client(Some(short_timeout)).unwrap();
+        let start = Instant::now();
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("request to a non-responding endpoint must error");
+        let elapsed = start.elapsed();
+
+        assert!(err.is_timeout(), "error should be a timeout, got: {err}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "configurator override should fire fast, took {elapsed:?}"
+        );
     }
 }
