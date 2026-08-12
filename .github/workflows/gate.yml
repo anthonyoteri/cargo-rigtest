@@ -1,0 +1,101 @@
+name: Gate
+
+# A single always-running check that branch protection can require. It goes
+# green iff every *other* check on the PR head commit is success/skipped/
+# neutral, so path-filtered or advisory jobs that skip (or are allowed to fail)
+# never block merge. Requiring only "Gate" avoids naming individual jobs that
+# don't run on every PR.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  checks: read
+  statuses: read
+  contents: read
+
+concurrency:
+  group: gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all other checks to succeed or skip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          # This job's own check-run name — excluded to avoid waiting on itself.
+          SELF_NAME: Gate
+          # Advisory checks that must never block the gate (regex over the
+          # check-run name / status context). The nightly matrix leg is
+          # continue-on-error, so an allowed failure there stays non-blocking.
+          ADVISORY_REGEX: nightly
+          SETTLE_SECONDS: "30"
+          POLL_SECONDS: "15"
+          TIMEOUT_SECONDS: "1800"
+        run: |
+          set -euo pipefail
+
+          fetch_checks() {
+            gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
+              -q '.check_runs[]
+                  | select(.name != env.SELF_NAME)
+                  | select((.name | test(env.ADVISORY_REGEX)) | not)
+                  | [.name, .status, (.conclusion // "")] | @tsv'
+          }
+
+          fetch_statuses() {
+            gh api "repos/$REPO/commits/$SHA/status" \
+              -q '.statuses[]
+                  | select((.context | test(env.ADVISORY_REGEX)) | not)
+                  | [.context, .state] | @tsv'
+          }
+
+          # Let sibling workflows register their checks before the first look,
+          # so we don't pass vacuously against a not-yet-populated commit.
+          sleep "$SETTLE_SECONDS"
+
+          start=$(date +%s)
+          while :; do
+            checks="$(fetch_checks || true)"
+            statuses="$(fetch_statuses || true)"
+
+            # A check-run is pending unless status == completed; a commit
+            # status is pending in the literal "pending" state.
+            pending_checks="$(printf '%s\n' "$checks" | awk -F'\t' 'NF && $2!="completed"')"
+            pending_statuses="$(printf '%s\n' "$statuses" | awk -F'\t' 'NF && $2=="pending"')"
+
+            if [ -z "$pending_checks" ] && [ -z "$pending_statuses" ]; then
+              break
+            fi
+
+            now=$(date +%s)
+            if [ $((now - start)) -ge "$TIMEOUT_SECONDS" ]; then
+              echo "::error::Gate timed out waiting for checks to complete."
+              echo "Still pending:"
+              printf '%s\n' "$pending_checks" "$pending_statuses" | sed '/^$/d'
+              exit 1
+            fi
+            sleep "$POLL_SECONDS"
+          done
+
+          # All non-excluded checks are complete — a passing conclusion is
+          # success, skipped, or neutral; anything else (failure, timed_out,
+          # cancelled, action_required, stale) blocks. Commit statuses must be
+          # success.
+          bad_checks="$(printf '%s\n' "$checks" | awk -F'\t' 'NF && $3!="success" && $3!="skipped" && $3!="neutral"')"
+          bad_statuses="$(printf '%s\n' "$statuses" | awk -F'\t' 'NF && $2!="success"')"
+
+          if [ -n "$bad_checks" ] || [ -n "$bad_statuses" ]; then
+            echo "::error::One or more required checks did not succeed."
+            printf '%s\n' "$bad_checks" "$bad_statuses" | sed '/^$/d'
+            exit 1
+          fi
+
+          echo "All checks passed, skipped, or neutral:"
+          printf '%s\n' "$checks" "$statuses" | sed '/^$/d' | sort -u
