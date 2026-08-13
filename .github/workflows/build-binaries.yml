@@ -73,7 +73,7 @@ jobs:
 
       - name: Install cross (Linux aarch64)
         if: matrix.use_cross
-        uses: taiki-e/install-action@2793c337589f216c26806998c34d2c7ed863f875 # cross
+        uses: taiki-e/install-action@0f5fdb93bf92e11f9d6315711daf2eea7e66f6c8 # cross
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
