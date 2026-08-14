@@ -9,7 +9,7 @@ authors = ["Anthony Oteri <anthony.oteri@agiletv.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anthonyoteri/cargo-rigtest"
 homepage = "https://github.com/anthonyoteri/cargo-rigtest"
-rust-version = "1.87"
+rust-version = "1.88"
 
 [workspace.dependencies]
 rigtest-macros = { version = "0.7", path = "rigtest-macros" }
