@@ -16,9 +16,6 @@
 
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
-use syn::parse::Parser;
-use syn::punctuated::Punctuated;
-use syn::spanned::Spanned;
 use syn::Expr;
 use syn::FnArg;
 use syn::ItemFn;
@@ -27,6 +24,9 @@ use syn::Pat;
 use syn::ReturnType;
 use syn::Token;
 use syn::Type;
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 
 use crate::{result_err_type, type_is_arc_test_context};
 

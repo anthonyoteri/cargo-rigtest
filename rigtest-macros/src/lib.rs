@@ -3,15 +3,15 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::parse::Parser;
-use syn::parse_macro_input;
-use syn::punctuated::Punctuated;
 use syn::FnArg;
 use syn::ItemFn;
 use syn::Pat;
 use syn::ReturnType;
 use syn::Token;
 use syn::Type;
+use syn::parse::Parser;
+use syn::parse_macro_input;
+use syn::punctuated::Punctuated;
 
 mod testcase;
 

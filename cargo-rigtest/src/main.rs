@@ -5,8 +5,8 @@ mod junit;
 use std::process::Command;
 use std::process::Stdio;
 
-use anyhow::anyhow;
 use anyhow::Context;
+use anyhow::anyhow;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;

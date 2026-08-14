@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use quick_junit::{NonSuccessKind, Report, TestCase, TestCaseStatus, TestSuite};
 
 use crate::ReporterKind;
@@ -257,10 +257,12 @@ mod tests {
         let report = aggregate(&expected);
         assert_eq!(report.test_suites.len(), 2);
         // Both renamed to "acceptance" but distinct content.
-        assert!(report
-            .test_suites
-            .iter()
-            .all(|s| s.name.as_str() == "acceptance"));
+        assert!(
+            report
+                .test_suites
+                .iter()
+                .all(|s| s.name.as_str() == "acceptance")
+        );
         let case_names: Vec<&str> = report
             .test_suites
             .iter()

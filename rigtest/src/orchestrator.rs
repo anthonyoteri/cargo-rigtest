@@ -2,14 +2,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
-use rand::seq::SliceRandom as _;
 use rand::RngExt as _;
 use rand::SeedableRng as _;
+use rand::seq::SliceRandom as _;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::junit::{JunitConfig, JunitReporter};
-use crate::preflight_runner::{run_preflight, PreflightReport};
+use crate::preflight_runner::{PreflightReport, run_preflight};
 use crate::registry::{
     RIG_DEFAULT_TIMEOUT, RIG_GLOBAL_SETUP, RIG_GLOBAL_TEARDOWN, RIG_PREFLIGHT, RIG_TEST_CASES,
 };

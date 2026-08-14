@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rigtest::registry::RIG_TEST_CASES;
-use rigtest::{fixture, testcase, TestContext};
+use rigtest::{TestContext, fixture, testcase};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 

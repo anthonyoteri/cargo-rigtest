@@ -315,9 +315,9 @@ pub mod __internal {
     }
 }
 
+pub use context::TestContext;
 #[cfg(feature = "http-client")]
 pub use context::http_client;
-pub use context::TestContext;
 #[cfg(all(feature = "ssh-client", unix))]
 pub use openssh;
 pub use preflight::Preflight;
@@ -334,10 +334,10 @@ pub use rigtest_macros::{fixture, global_setup, global_teardown, main, preflight
 /// Brings into scope: [`TestContext`] and the attribute macros [`testcase`],
 /// [`fixture`], [`global_setup`], [`global_teardown`], and [`main`].
 pub mod prelude {
+    pub use crate::TestContext;
     #[cfg(feature = "http-client")]
     pub use crate::http_client;
     pub use crate::preflight::Preflight;
-    pub use crate::TestContext;
     pub use rigtest_macros::{fixture, global_setup, global_teardown, main, preflight, testcase};
 }
 
