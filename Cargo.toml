@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.7.0"
 edition = "2024"
-authors = ["Anthony Oteri <anthony.oteri@agiletv.com>"]
+authors = ["Anthony Oteri <git@anthony.oteri.cc>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anthonyoteri/cargo-rigtest"
 homepage = "https://github.com/anthonyoteri/cargo-rigtest"
