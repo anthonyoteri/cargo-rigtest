@@ -304,7 +304,7 @@ impl TestContext {
 
 #[cfg(all(test, feature = "http-client"))]
 mod tests {
-    use super::{build_http_client, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT};
+    use super::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, build_http_client};
     use std::time::{Duration, Instant};
 
     #[test]

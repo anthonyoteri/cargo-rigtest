@@ -347,10 +347,12 @@ impl TestEventReporter for Reporter {
         // PRD Q3.B2), not a third bucket. When zero, the summary format
         // is byte-identical to the pre-flaky output.
         let flaky = *self.flaky_passed.lock().expect("flaky_passed mutex");
-        let mut parts = vec![style(passed_label(passed, flaky))
-            .green()
-            .bold()
-            .to_string()];
+        let mut parts = vec![
+            style(passed_label(passed, flaky))
+                .green()
+                .bold()
+                .to_string(),
+        ];
         if skipped > 0 {
             parts.push(style(format!("{skipped} skipped")).dim().bold().to_string());
         }
@@ -701,12 +703,13 @@ mod tests {
         assert_eq!(*r.flaky_passed.lock().unwrap(), 1);
         // Retry state is consumed at the terminal event so a follow-up run
         // of the same key never inherits stale counts.
-        assert!(r
-            .retry_counts
-            .lock()
-            .unwrap()
-            .get(&(t.module.to_string(), t.name.to_string()))
-            .is_none());
+        assert!(
+            r.retry_counts
+                .lock()
+                .unwrap()
+                .get(&(t.module.to_string(), t.name.to_string()))
+                .is_none()
+        );
     }
 
     #[test]

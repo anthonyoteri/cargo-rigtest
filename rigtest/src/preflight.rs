@@ -594,10 +594,10 @@ impl Preflight {
     ///     .equals("us-east-1");
     /// ```
     pub fn equals(mut self, value: impl Into<Cow<'static, str>>) -> Self {
-        if let Some(last) = self.probes.last_mut() {
-            if let ProbeKind::Env { expected, .. } = &mut last.kind {
-                *expected = Some(value.into());
-            }
+        if let Some(last) = self.probes.last_mut()
+            && let ProbeKind::Env { expected, .. } = &mut last.kind
+        {
+            *expected = Some(value.into());
         }
         self
     }
@@ -617,10 +617,10 @@ impl Preflight {
     /// ```
     #[cfg(feature = "http-client")]
     pub fn expect_status<S: Into<ExpectStatus>>(mut self, status: S) -> Self {
-        if let Some(last) = self.probes.last_mut() {
-            if let ProbeKind::Http { expect, .. } = &mut last.kind {
-                *expect = status.into();
-            }
+        if let Some(last) = self.probes.last_mut()
+            && let ProbeKind::Http { expect, .. } = &mut last.kind
+        {
+            *expect = status.into();
         }
         self
     }
@@ -681,10 +681,10 @@ impl Preflight {
     /// ```
     #[cfg(all(feature = "ssh-client", unix))]
     pub fn command(mut self, command: impl Into<Cow<'static, str>>) -> Self {
-        if let Some(last) = self.probes.last_mut() {
-            if let ProbeKind::Ssh { command: c, .. } = &mut last.kind {
-                *c = command.into();
-            }
+        if let Some(last) = self.probes.last_mut()
+            && let ProbeKind::Ssh { command: c, .. } = &mut last.kind
+        {
+            *c = command.into();
         }
         self
     }

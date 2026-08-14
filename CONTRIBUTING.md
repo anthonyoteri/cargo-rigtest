@@ -5,7 +5,7 @@ Thank you for your interest in contributing.
 ## Getting started
 
 1. Fork the repository and clone your fork.
-2. Install a stable Rust toolchain (MSRV 1.87). `rustup` is recommended.
+2. Install a stable Rust toolchain (MSRV 1.88). `rustup` is recommended.
 3. Build and test:
 
 ```

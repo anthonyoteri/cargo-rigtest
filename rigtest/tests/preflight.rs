@@ -7,9 +7,9 @@
 
 use std::time::Duration;
 
-use rigtest::preflight::{ProbeKind, DEFAULT_PROBE_TIMEOUT};
-use rigtest::registry::RIG_PREFLIGHT;
 use rigtest::Preflight;
+use rigtest::preflight::{DEFAULT_PROBE_TIMEOUT, ProbeKind};
+use rigtest::registry::RIG_PREFLIGHT;
 
 #[rigtest::preflight]
 fn preflight() -> Preflight {

@@ -4,12 +4,12 @@ resolver = "2"
 
 [workspace.package]
 version = "0.7.0"
-edition = "2021"
-authors = ["Anthony Oteri <anthony.oteri@agiletv.com>"]
+edition = "2024"
+authors = ["Anthony Oteri <git@anthony.oteri.cc>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anthonyoteri/cargo-rigtest"
 homepage = "https://github.com/anthonyoteri/cargo-rigtest"
-rust-version = "1.87"
+rust-version = "1.88"
 
 [workspace.dependencies]
 rigtest-macros = { version = "0.7", path = "rigtest-macros" }

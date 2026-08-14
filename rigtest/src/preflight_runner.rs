@@ -17,7 +17,7 @@ use anyhow::anyhow;
 use console::style;
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpStream, lookup_host};
 use tokio::time::timeout;
 
 use crate::preflight::{CustomProbeFn, Probe, ProbeKind};

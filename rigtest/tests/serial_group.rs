@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use rigtest::registry::RIG_TEST_CASES;
-use rigtest::{testcase, TestContext};
+use rigtest::{TestContext, testcase};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 

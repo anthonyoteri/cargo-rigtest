@@ -269,15 +269,14 @@ impl TestEventReporter for JunitReporter {
             case.set_classname(p.classname.clone());
         }
         case.set_time(duration);
-        if let Some(p) = progress {
-            // The test passed eventually — earlier failed attempts become
-            // <flakyFailure>/<flakyError> children.
-            if !p.reruns.is_empty() {
-                if let TestCaseStatus::Success { flaky_runs, .. } = &mut case.status {
-                    for attempt in &p.reruns {
-                        flaky_runs.push(make_rerun(attempt));
-                    }
-                }
+        // The test passed eventually — earlier failed attempts become
+        // <flakyFailure>/<flakyError> children.
+        if let Some(p) = progress
+            && !p.reruns.is_empty()
+            && let TestCaseStatus::Success { flaky_runs, .. } = &mut case.status
+        {
+            for attempt in &p.reruns {
+                flaky_runs.push(make_rerun(attempt));
             }
         }
         self.push_finalized(case);
@@ -313,11 +312,11 @@ impl TestEventReporter for JunitReporter {
         status.set_type(outcome_type(outcome));
         let has_reruns = progress.as_ref().is_some_and(|p| !p.reruns.is_empty());
         if has_reruns {
-            if let TestCaseStatus::NonSuccess { reruns, .. } = &mut status {
-                if let Some(p) = &progress {
-                    for attempt in &p.reruns {
-                        reruns.runs.push(make_rerun(attempt));
-                    }
+            if let TestCaseStatus::NonSuccess { reruns, .. } = &mut status
+                && let Some(p) = &progress
+            {
+                for attempt in &p.reruns {
+                    reruns.runs.push(make_rerun(attempt));
                 }
             }
             status.set_rerun_kind(FlakyOrRerun::Rerun);

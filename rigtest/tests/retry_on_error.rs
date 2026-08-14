@@ -8,12 +8,12 @@
 use std::sync::Arc;
 
 use rigtest::registry::RIG_TEST_CASES;
-use rigtest::{testcase, TestContext};
+use rigtest::{TestContext, testcase};
 
 #[derive(Debug)]
 #[allow(dead_code)] // The variants exist only to be referenced inside the
-                    // `retry_on_error = …` pattern fed into `matches!`; the test bodies in
-                    // this file never construct an `Err(_)` so the analyzer flags them.
+// `retry_on_error = …` pattern fed into `matches!`; the test bodies in
+// this file never construct an `Err(_)` so the analyzer flags them.
 enum DemoError {
     Transient,
     Fatal(String),
