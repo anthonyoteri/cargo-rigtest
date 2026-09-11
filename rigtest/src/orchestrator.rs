@@ -566,6 +566,11 @@ pub(crate) async fn run(args: RuntimeArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // The fake `SubprocessRunner`s below answer from a canned table, so their
+    // `async fn run` has nothing to await. `unknown_lints` keeps this quiet on
+    // clippy older than 1.98, where `unused_async_trait_impl` does not exist.
+    #![allow(unknown_lints, clippy::unused_async_trait_impl)]
+
     use super::*;
     use crate::context::TestContext;
     use crate::protocol::SubprocessOutcome;
