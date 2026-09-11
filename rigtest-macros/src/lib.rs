@@ -202,8 +202,9 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Any parameter that is neither the `Arc<TestContext>` argument nor a
 /// `#[case]` parameter is resolved as a [`fixture`] by name: its identifier
-/// must match a `#[fixture]` in scope, and it receives that fixture's
-/// returned value. See [`fixture`] for setup/teardown semantics.
+/// must match a `#[fixture]` in scope, optionally with one leading underscore
+/// (`clean_db` and `_clean_db` name the same fixture), and it receives that
+/// fixture's returned value. See [`fixture`] for setup/teardown semantics.
 ///
 /// # Flags
 ///
@@ -507,18 +508,19 @@ pub(crate) fn type_is_arc_test_context(ty: &Type) -> bool {
 /// use std::sync::Arc;
 /// use rigtest::{fixture, testcase, TestContext};
 ///
-/// struct Db;
+/// struct Db {
+///     rows: usize,
+/// }
 ///
 /// #[fixture]
 /// async fn clean_db(_ctx: Arc<TestContext>) -> Result<Db, rigtest::Error> {
 ///     // reset state and hand back a handle
-///     Ok(Db)
+///     Ok(Db { rows: 0 })
 /// }
 ///
 /// #[testcase]
-/// async fn uses_db(_ctx: Arc<TestContext>, clean_db: Db) -> Result<(), rigtest::Error> {
-///     // `clean_db` is the value returned by the fixture's setup
-///     let _db = clean_db;
+/// async fn starts_empty(_ctx: Arc<TestContext>, clean_db: Db) -> Result<(), rigtest::Error> {
+///     assert_eq!(clean_db.rows, 0);
 ///     Ok(())
 /// }
 /// ```
@@ -531,9 +533,8 @@ pub(crate) fn type_is_arc_test_context(ty: &Type) -> bool {
 ///
 /// A fixture often exists for what its setup *does* rather than what it
 /// returns, and its value is a marker nobody reads. Prefix the parameter with
-/// an underscore in that case: one leading underscore is stripped when
-/// resolving the fixture, so `_clean_db` runs the fixture `clean_db` while
-/// binding it as `_clean_db` and leaving `unused_variables` quiet.
+/// an underscore in that case: `clean_db` and `_clean_db` name the same
+/// fixture, because one leading underscore is stripped when resolving it.
 ///
 /// ```ignore
 /// #[testcase]
@@ -541,15 +542,20 @@ pub(crate) fn type_is_arc_test_context(ty: &Type) -> bool {
 ///     _ctx: Arc<TestContext>,
 ///     _clean_db: Db,
 /// ) -> Result<(), rigtest::Error> {
-///     // the fixture ran; its value is deliberately not used
+///     // the reset ran; the handle is not needed
 ///     Ok(())
 /// }
 /// ```
 ///
-/// Declaring the parameter is what invokes the fixture — the underscore
-/// changes only the binding, never whether setup and teardown run. Stripping
-/// is unconditional, so a fixture whose own name begins with an underscore is
-/// named by doubling it: `__foo` resolves `_foo`.
+/// Declaring the parameter is what invokes the fixture, so the underscore
+/// changes nothing about whether setup and teardown run — only whether the
+/// unused value needs a binding to keep `unused_variables` quiet. Arguments
+/// are passed positionally and the expansion binds under the resolved fixture
+/// name, so the parameter's own spelling never reaches the generated code.
+///
+/// Stripping is unconditional, so a fixture whose own name begins with an
+/// underscore is named by doubling it: `__foo` resolves `_foo`. Taking one
+/// fixture under both spellings at once is a compile error.
 ///
 /// # Teardown
 ///
