@@ -5,6 +5,14 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Releases are generated automatically by [cocogitto](https://docs.cocogitto.io/) from [Conventional Commits](https://www.conventionalcommits.org/).
 
 - - -
+## [v0.8.0](https://github.com/anthonyoteri/cargo-rigtest/compare/0bcb85b755986d1b094c22cf51fff32ec63b299b..v0.8.0) - 2026-09-11
+#### Features
+- (**macros**) accept a leading underscore on fixture parameters (#137) - ([da2c99b](https://github.com/anthonyoteri/cargo-rigtest/commit/da2c99bdabf688303c23705b03ac8f3089f3bc5e)) - [@anthonyoteri](https://github.com/anthonyoteri)
+#### Bug Fixes
+- default HTTP client connect + request timeouts (#123) - ([e242cbb](https://github.com/anthonyoteri/cargo-rigtest/commit/e242cbb1a627e8c19a09eb261b3f2608b0ebb520)) - [@anthonyoteri](https://github.com/anthonyoteri)
+
+- - -
+
 ## [v0.7.0](https://github.com/anthonyoteri/cargo-rigtest/compare/f888c99f6e23f3b2ecaf7845b1a82ed662d3d9a0..v0.7.0) - 2026-08-10
 #### Features
 - (**macros**) function-scoped #[fixture] injected by parameter name (#111) - ([18a6f5f](https://github.com/anthonyoteri/cargo-rigtest/commit/18a6f5f30fefaeaa464dfac12f2ae16c454358c0)) - [@anthonyoteri](https://github.com/anthonyoteri)

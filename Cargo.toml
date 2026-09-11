@@ -3,7 +3,7 @@ members = ["cargo-rigtest", "rigtest-macros", "rigtest", "examples/basic", "exam
 resolver = "2"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 authors = ["Anthony Oteri <git@anthony.oteri.cc>"]
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ homepage = "https://github.com/anthonyoteri/cargo-rigtest"
 rust-version = "1.88"
 
 [workspace.dependencies]
-rigtest-macros = { version = "0.7", path = "rigtest-macros" }
+rigtest-macros = { version = "0.8", path = "rigtest-macros" }
 libc = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "process", "time", "io-util", "macros", "net"] }
 linkme = "0.3"
