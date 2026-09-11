@@ -185,7 +185,12 @@
 //! Setup runs before the test body and teardown (declared with
 //! `#[fixture(teardown = ...)]`) after it. With several fixtures on one test,
 //! setup is left-to-right and teardown is LIFO. Teardown does not run on panic
-//! or timeout. See [`fixture`] for the full contract.
+//! or timeout.
+//!
+//! For a fixture taken because of what its setup *does* rather than what it
+//! returns, prefix the parameter with an underscore — `_clean_db` runs the
+//! fixture `clean_db` and keeps `unused_variables` quiet. See [`fixture`] for
+//! the full contract.
 //!
 //! # Test context
 //!

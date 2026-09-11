@@ -523,9 +523,33 @@ pub(crate) fn type_is_arc_test_context(ty: &Type) -> bool {
 /// }
 /// ```
 ///
-/// Because a fixture resolves through an item named exactly like the
-/// parameter, a test only needs that name in scope (a normal `use`), so
-/// fixtures defined in one module work in tests in another.
+/// Because a fixture resolves through an item named like the parameter, a
+/// test only needs that name in scope (a normal `use`), so fixtures defined
+/// in one module work in tests in another.
+///
+/// ## Fixtures taken for their side effect
+///
+/// A fixture often exists for what its setup *does* rather than what it
+/// returns, and its value is a marker nobody reads. Prefix the parameter with
+/// an underscore in that case: one leading underscore is stripped when
+/// resolving the fixture, so `_clean_db` runs the fixture `clean_db` while
+/// binding it as `_clean_db` and leaving `unused_variables` quiet.
+///
+/// ```ignore
+/// #[testcase]
+/// async fn starts_from_a_clean_db(
+///     _ctx: Arc<TestContext>,
+///     _clean_db: Db,
+/// ) -> Result<(), rigtest::Error> {
+///     // the fixture ran; its value is deliberately not used
+///     Ok(())
+/// }
+/// ```
+///
+/// Declaring the parameter is what invokes the fixture — the underscore
+/// changes only the binding, never whether setup and teardown run. Stripping
+/// is unconditional, so a fixture whose own name begins with an underscore is
+/// named by doubling it: `__foo` resolves `_foo`.
 ///
 /// # Teardown
 ///

@@ -372,7 +372,8 @@ enum ParamKind {
     /// A `#[values(...)]`-tagged parameter, owning its value expressions.
     Values(Vec<Expr>),
     /// A fixture parameter, resolved by name against the same-named struct
-    /// emitted by `#[fixture]`. Carries the parameter identifier.
+    /// emitted by `#[fixture]`. Carries the parameter identifier as written;
+    /// [`fixture_target`] derives the fixture it names from it.
     Fixture(syn::Ident),
 }
 
@@ -440,10 +441,32 @@ fn classify_params(func: &mut ItemFn) -> Result<Vec<ParamKind>, syn::Error> {
                 return Err(syn::Error::new_spanned(
                     &pat_type.pat,
                     "#[testcase] fixture parameter must be a plain identifier that names a \
-                     #[fixture] in scope (patterns such as tuples or `_` are not supported)",
+                     #[fixture] in scope, optionally prefixed with `_` to take the fixture \
+                     for its side effect (patterns such as tuples or a bare `_` are not \
+                     supported)",
                 ));
             };
             params.push(ParamKind::Fixture(pat_ident.ident.clone()));
+        }
+    }
+
+    // `answer` and `_answer` name one fixture, so taking both would set it up
+    // twice and pass the same binding for both parameters. Reject it rather
+    // than silently miscompile.
+    let mut seen: Vec<String> = Vec::new();
+    for param in &params {
+        if let ParamKind::Fixture(ident) = param {
+            let target = fixture_target(ident).to_string();
+            if seen.contains(&target) {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "#[testcase] takes the fixture `{target}` more than once; `{target}` \
+                         and `_{target}` name the same fixture"
+                    ),
+                ));
+            }
+            seen.push(target);
         }
     }
     Ok(params)
@@ -582,7 +605,7 @@ fn plan(
         let args = params
             .iter()
             .map(|p| match p {
-                ParamKind::Fixture(ident) => ArgSource::Fixture(ident.clone()),
+                ParamKind::Fixture(ident) => ArgSource::Fixture(fixture_target(ident)),
                 // No `#[case]`/`#[values]` params exist in this branch.
                 _ => ArgSource::Ctx,
             })
@@ -641,7 +664,7 @@ fn plan(
                 .iter()
                 .map(|p| match p {
                     ParamKind::Ctx => ArgSource::Ctx,
-                    ParamKind::Fixture(ident) => ArgSource::Fixture(ident.clone()),
+                    ParamKind::Fixture(ident) => ArgSource::Fixture(fixture_target(ident)),
                     ParamKind::Values(v) => {
                         let vi = tuple[values_dim];
                         values_dim += 1;
@@ -673,11 +696,35 @@ fn plan(
 }
 
 /// Collect the fixture parameter identifiers in declaration order.
+/// The `#[fixture]` that a parameter names: the identifier as written, with
+/// one leading underscore removed.
+///
+/// `clean_db` and `_clean_db` therefore resolve the same fixture, while the
+/// binding keeps whichever spelling the author chose. That is what lets a
+/// fixture taken purely for its side effect avoid `unused_variables` without
+/// a `let _ = ...;` line, and without an `#[allow]` that would also hide a
+/// genuinely forgotten value.
+///
+/// Stripping is unconditional because the macro emits a path for `rustc` to
+/// resolve and cannot know at expansion time which fixtures exist, so there is
+/// no "try the exact name, then fall back". A fixture whose own name starts
+/// with an underscore is reached by doubling it: `__foo` names `_foo`.
+/// `_` alone is left as-is; it is not a valid identifier on its own, and
+/// `classify_params` rejects the wildcard pattern before reaching here.
+fn fixture_target(binding: &syn::Ident) -> syn::Ident {
+    match binding.to_string().strip_prefix('_') {
+        Some(stripped) if !stripped.is_empty() && stripped != "_" => {
+            syn::Ident::new(stripped, binding.span())
+        }
+        _ => binding.clone(),
+    }
+}
+
 fn fixture_idents(params: &[ParamKind]) -> Vec<syn::Ident> {
     params
         .iter()
         .filter_map(|p| match p {
-            ParamKind::Fixture(ident) => Some(ident.clone()),
+            ParamKind::Fixture(ident) => Some(fixture_target(ident)),
             _ => None,
         })
         .collect()
@@ -850,7 +897,10 @@ fn build_testcase_body(
 }
 
 /// Wrap `inner` (a `Result<(), BoxError>`-valued expression) in fixture
-/// setup/teardown scopes. Fixtures are set up left-to-right and torn down
+/// setup/teardown scopes. `fixtures` holds resolved fixture names (see
+/// [`fixture_target`]), which are also the binding names — arguments are
+/// passed positionally, so the parameter's own spelling never appears in the
+/// generated code. Fixtures are set up left-to-right and torn down
 /// in LIFO order; a teardown error is surfaced only when the body
 /// succeeded, otherwise the body's error wins. Setup uses `?`, so a fixture
 /// whose setup fails aborts before the body runs and does not trigger
@@ -990,6 +1040,48 @@ mod tests {
         // Unsuffixed single case, fixture arg source names the fixture.
         assert_eq!(case.name, "f");
         assert!(matches!(&case.args[1], ArgSource::Fixture(id) if id == "answer"));
+    }
+
+    #[test]
+    fn underscored_fixture_param_resolves_the_undecorated_fixture() {
+        let plan = plan_of(
+            "",
+            "async fn f(_ctx: Arc<TestContext>, _answer: u32) -> Result<(), E> { Ok(()) }",
+        );
+        // The parameter's own spelling stays in the user's signature; the
+        // generated code only ever names the fixture.
+        assert_eq!(plan.fixtures.len(), 1);
+        assert_eq!(plan.fixtures[0].to_string(), "answer");
+        let case = &plan.cases[0];
+        assert!(matches!(&case.args[1], ArgSource::Fixture(id) if id == "answer"));
+    }
+
+    #[test]
+    fn one_fixture_cannot_be_taken_under_both_spellings() {
+        let mut func: ItemFn = syn::parse_str(
+            "async fn f(_ctx: Arc<TestContext>, answer: u32, _answer: u32) -> Result<(), E> { Ok(()) }",
+        )
+        .unwrap();
+        let Err(err) = classify_params(&mut func) else {
+            panic!("taking one fixture under both spellings must be rejected");
+        };
+        assert!(
+            err.to_string().contains("more than once"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn fixture_target_strips_one_leading_underscore() {
+        let target = |name: &str| {
+            fixture_target(&syn::Ident::new(name, proc_macro2::Span::call_site())).to_string()
+        };
+        assert_eq!(target("answer"), "answer");
+        assert_eq!(target("_answer"), "answer");
+        // Doubling reaches a fixture whose own name starts with an underscore.
+        assert_eq!(target("__answer"), "_answer");
+        // `__` would strip to `_`, which is not an identifier; left alone.
+        assert_eq!(target("__"), "__");
     }
 
     #[test]
