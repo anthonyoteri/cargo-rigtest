@@ -466,6 +466,29 @@ async fn insert_then_count(
 }
 ```
 
+Often a fixture is wanted for what its setup *does* rather than what it
+returns, and the value is a marker nobody reads. Prefix the parameter with
+an underscore in that case — `clean_db` and `_clean_db` name the same
+fixture, because one leading underscore is stripped when resolving it:
+
+```rust
+#[testcase]
+async fn starts_from_a_clean_slate(
+    _ctx: Arc<TestContext>,
+    _clean_db: Db,              // ← the reset ran; the handle is not needed
+) -> Result<(), rigtest::Error> {
+    assert_eq!(count_rows_some_other_way().await?, 0);
+    Ok(())
+}
+```
+
+Declaring the parameter is what invokes the fixture, so the underscore
+changes nothing about whether setup and teardown run — only whether the
+unused value needs a binding to keep `unused_variables` quiet. Stripping is
+unconditional, so a fixture whose own name begins with an underscore is
+named by doubling it: `__foo` resolves `_foo`. Taking one fixture under
+both spellings at once is a compile error.
+
 A fixture may take no arguments or a single `ctx: Arc<TestContext>`, and
 declares optional cleanup with `#[fixture(teardown = release)]` naming an
 `async fn(Arc<TestContext>) -> Result<(), E>`. When a test requests

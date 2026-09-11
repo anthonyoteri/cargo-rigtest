@@ -107,12 +107,53 @@ async fn values_with_fixture(
     Ok(())
 }
 
+// A fixture taken for its side effect: the value is a marker nobody reads, so
+// the parameter is underscore-prefixed. One leading underscore is stripped to
+// find the fixture, and the binding keeps the underscore so `unused_variables`
+// stays quiet without a `let _ = ...;` line.
+struct Marker;
+
+static SIDE_EFFECT_RAN: Mutex<bool> = Mutex::new(false);
+
+#[fixture]
+async fn side_effect(_ctx: Arc<TestContext>) -> Result<Marker, BoxError> {
+    *SIDE_EFFECT_RAN.lock().unwrap() = true;
+    Ok(Marker)
+}
+
+#[testcase]
+async fn underscored_fixture_still_runs(
+    _ctx: Arc<TestContext>,
+    _side_effect: Marker,
+) -> Result<(), BoxError> {
+    assert!(
+        *SIDE_EFFECT_RAN.lock().unwrap(),
+        "declaring the parameter runs the fixture, underscore or not"
+    );
+    Ok(())
+}
+
+// Both spellings in one signature, resolving two different fixtures: the value
+// of one is used, the other is taken only for its effect.
+#[testcase]
+async fn mixes_used_and_underscored_fixtures(
+    _ctx: Arc<TestContext>,
+    answer: u32,
+    _side_effect: Marker,
+) -> Result<(), BoxError> {
+    assert_eq!(answer, 42);
+    assert!(*SIDE_EFFECT_RAN.lock().unwrap());
+    Ok(())
+}
+
 #[test]
 fn fixture_tests_register() {
     for name in [
         "receives_fixture_value",
         "receives_two_fixtures",
         "uses_cross_module_fixture",
+        "underscored_fixture_still_runs",
+        "mixes_used_and_underscored_fixtures",
         // One registration per `#[case]` row, each with the fixture wired in.
         "case_with_fixture::case_1",
         "case_with_fixture::case_2",

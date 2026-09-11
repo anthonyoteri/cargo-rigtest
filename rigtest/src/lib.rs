@@ -168,19 +168,27 @@
 //! ```no_run
 //! # use std::sync::Arc;
 //! # use rigtest::{fixture, testcase, TestContext};
-//! struct Db;
+//! struct Db {
+//!     rows: usize,
+//! }
 //!
 //! #[fixture]
 //! async fn clean_db(_ctx: Arc<TestContext>) -> Result<Db, rigtest::Error> {
-//!     Ok(Db)
+//!     Ok(Db { rows: 0 })
 //! }
 //!
 //! #[testcase]
-//! async fn uses_db(_ctx: Arc<TestContext>, clean_db: Db) -> Result<(), rigtest::Error> {
-//!     let _db = clean_db;
+//! async fn starts_empty(_ctx: Arc<TestContext>, clean_db: Db) -> Result<(), rigtest::Error> {
+//!     assert_eq!(clean_db.rows, 0);
 //!     Ok(())
 //! }
 //! ```
+//!
+//! `clean_db` and `_clean_db` name the same fixture — one leading underscore
+//! is stripped when resolving it. Use the plain form when the test reads the
+//! value, and the underscored form when the fixture is there for what its
+//! setup *does*, so the unused value does not need a binding to keep
+//! `unused_variables` quiet.
 //!
 //! Setup runs before the test body and teardown (declared with
 //! `#[fixture(teardown = ...)]`) after it. With several fixtures on one test,
