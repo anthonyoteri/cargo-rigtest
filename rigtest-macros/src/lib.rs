@@ -663,7 +663,6 @@ fn expand_fixture(attr: TokenStream, item: TokenStream) -> Result<TokenStream, s
         }
     } else {
         quote! {
-            #[allow(clippy::unused_async)]
             #vis async fn __rigtest_fixture_teardown(
                 _ctx: ::std::sync::Arc<::rigtest::TestContext>,
             ) -> ::core::result::Result<(), #err_ty> {
@@ -684,8 +683,12 @@ fn expand_fixture(attr: TokenStream, item: TokenStream) -> Result<TokenStream, s
         #vis struct #ident {}
 
         #[allow(non_camel_case_types)]
+        // A fixture body need not await anything (a constant, a builder), but
+        // `#[fixture]` requires `async fn`, so both `unused_async` and its
+        // impl-block sibling are expected here. `unknown_lints` keeps the
+        // second name quiet on clippy older than 1.98, where it does not exist.
+        #[allow(unknown_lints, clippy::unused_async, clippy::unused_async_trait_impl)]
         impl #ident {
-            #[allow(clippy::unused_async)]
             #vis async fn __rigtest_fixture_setup(#setup_param) -> #return_ty #body
 
             #teardown_fn
