@@ -5,7 +5,9 @@
   ],
   "labels": ["dependencies"],
   "schedule": ["before 6am on Monday"],
-  "dependencyDashboard": true,
+  "dependencyDashboard": {
+    "enabled": true
+  },
   "packageRules": [
     {
       "description": "Rust patch updates — auto-merge when CI passes",
